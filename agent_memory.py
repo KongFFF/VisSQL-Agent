@@ -36,6 +36,10 @@ class WorkingMemory:
         """吐出干干净净的对话列表，直接喂给 Coder"""
         return self.messages
 
+    def snapshot(self) -> list:
+        """导出当前记忆快照，供评测脚本做轨迹存档。"""
+        return [dict(message) for message in self.messages]
+
 # --- 极简测试 ---
 if __name__ == "__main__":
     memory = WorkingMemory()
