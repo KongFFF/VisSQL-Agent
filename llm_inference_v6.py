@@ -26,10 +26,10 @@ class QwenSQLInference_v6:
         # 【核心改动】：加一个 if 判断
         if lora_path:
             print(f">>> 🛡️ 正在挂载 V6 LoRA 权重: {lora_path} ...")
-            self.model = PeftModel.from_pretrained(base_model, lora_path).eval()
+            self.model = PeftModel.from_pretrained(self.base_model, lora_path).eval()
         else:
             print(f">>> 裸奔模式！使用纯净版基座模型进行 Zero-Shot 评测...")
-            self.model = base_model.eval()
+            self.model = self.base_model.eval()
         print("模型加载完毕，准备就绪。")
 
     def generate_sql(self, question: str, table_schema: str) -> str:
