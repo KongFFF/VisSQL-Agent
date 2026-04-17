@@ -5,7 +5,14 @@ from agent_executor import SQLSandbox
 from agent_memory import WorkingMemory
 
 class VisSQLAgent:
-    def __init__(self, base_model_path: str, lora_path: str, db_path: str, max_retries: int = 3):
+    def __init__(
+        self,
+        base_model_path: str,
+        lora_path: str,
+        db_path: str,
+        max_retries: int = 3,
+        retry_on_empty_result: bool = False
+    ):
         """
         初始化 Agent 大堂经理，统筹主厨(Coder)与试吃员(Sandbox)。
         """
@@ -21,6 +28,7 @@ class VisSQLAgent:
         
         # 3. 设定最大反思重试次数 (防止陷入死循环)
         self.max_retries = max_retries
+        self.retry_on_empty_result = retry_on_empty_result
         print("✅ 系统初始化完成，随时准备接收查询！\n")
 
     def run_query(self, schema_info: str, user_question: str, db_path: str = None, verbose: bool = True):
@@ -70,7 +78,7 @@ class VisSQLAgent:
                 log(f"✅ 执行成功！查出 {result['row_count']} 条数据。")
                 log(f"📊 数据抽样: {result['results'][:2]}")
 
-                if result["row_count"] > 0:
+                if result["row_count"] > 0 or not self.retry_on_empty_result:
                     attempt_records.append(attempt_record)
                     return {
                         "final_sql": generated_sql,
@@ -159,7 +167,8 @@ if __name__ == "__main__":
         base_model_path=BASE_MODEL, 
         lora_path=LORA_PATH, 
         db_path=TEST_DB, 
-        max_retries=3  # 给它 3 次机会
+        max_retries=3,  # 给它 3 次机会
+        retry_on_empty_result=True
     )
 
     # 2. 伪造一个极其变态的测试场景 (故意少给点信息，考验它的反思能力)

@@ -99,6 +99,7 @@ def parse_args():
     parser.add_argument("--summary-file", default="agent_run_summary.jsonl", help="轻量摘要日志文件名")
     parser.add_argument("--trajectory-file", default="agent_trajectories.jsonl", help="完整轨迹日志文件名")
     parser.add_argument("--max-retries", type=int, default=3, help="Agent 最大重试轮数")
+    parser.add_argument("--retry-on-empty-result", action="store_true", help="是否在空结果时触发额外的 Reflexion / probe")
     parser.add_argument("--progress-every", type=int, default=50, help="每多少题打印一次进度")
     parser.add_argument("--resume", action="store_true", help="从已有输出继续跑")
     parser.add_argument("--start-index", type=int, default=0, help="从第几题开始跑（0-based）")
@@ -147,7 +148,8 @@ def run_evaluation():
         base_model_path=args.base_model,
         lora_path=args.lora_path,
         db_path=str(first_db_path),
-        max_retries=args.max_retries
+        max_retries=args.max_retries,
+        retry_on_empty_result=args.retry_on_empty_result
     )
 
     predict_mode = "a" if args.resume and predict_path.exists() else "w"
