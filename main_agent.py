@@ -83,9 +83,9 @@ class VisSQLAgent:
 # ==========================================
 if __name__ == "__main__":
     # ⚠️ 【请在这里替换为你真实的物理路径！】
-    BASE_MODEL = "/root/autodl-tmp/Qwen2.5-Coder-7B-Instruct"
-    LORA_PATH = None  # 如果你的 V6 是独立权重，这里填 None；如果是动态挂载，填 lora 路径
-    TEST_DB = "data/database_test_suite/database/concert_singer/concert_singer.sqlite"
+    BASE_MODEL = "/root/autodl-tmp/qwen2.5-coder-7b-instruct"
+    LORA_PATH = "/root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6"  # 如果你的 V6 是独立权重，这里填 None；如果是动态挂载，填 lora 路径
+    TEST_DB = "data/testsuitedatabases/database/concert_singer/concert_singer.sqlite"
 
     # 1. 实例化我们的终极系统
     agent = VisSQLAgent(
@@ -103,8 +103,8 @@ if __name__ == "__main__":
     表 singer_in_concert (concert_ID [FK->concert.concert_ID], Singer_ID [FK->singer.Singer_ID])
     """
     
-    # 我们故意提一个容易写错列名的问题
-    test_question = "找出办过演唱会的体育场的名字和容量。"
+    # 😈 终极陷阱：自然语言的性别陷阱
+    test_question = "列出所有女性歌手的名字和她们的歌曲名。"
 
     # 3. 跑起来！
     agent.run_query(schema_info=test_schema, user_question=test_question)
