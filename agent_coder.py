@@ -37,7 +37,7 @@ class CoderNode:
         防御性编程：从模型的啰嗦输出中，极其精准地扒出 SQL 代码块。
         """
         # 尝试匹配 ```sql ... ``` 或者 ``` ... ```
-        pattern = r"sql)?\s*(.*?)\s*```"
+        pattern = r"```(?:sql)?\s*(.*?)\s*```"
         match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
         if match:
             return match.group(1).strip()
