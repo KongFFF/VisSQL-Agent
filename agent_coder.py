@@ -88,11 +88,11 @@ class CoderNode:
 # ==========================================
 if __name__ == "__main__":
     # 请替换为你真实的 V6 模型路径
-    model_dir = "/root/autodl-tmp/Qwen-V6-Merged" 
-    lora_die = ""
+    model_dir = "/root/autodl-tmp/qwen2.5-coder-7b-instruct" 
+    lora_dir = "/root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6"
     
     try:
-        coder = CoderNode(model_dir)
+        coder = CoderNode(model_dir,lora_dir)
         
         # --- 场景 1：第一次请求 ---
         print("\n>>> 场景 1：初始查询")
