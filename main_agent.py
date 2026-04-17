@@ -55,12 +55,30 @@ class VisSQLAgent:
             if result["status"] == "success":
                 print(f"✅ 执行成功！查出 {result['row_count']} 条数据。")
                 print(f"📊 数据抽样: {result['results'][:2]}")
-                return {
-                    "final_sql": generated_sql,
-                    "is_success": True,
-                    "attempts": attempt,
-                    "data": result
-                }
+
+                if result["row_count"] > 0:
+                    return {
+                        "final_sql": generated_sql,
+                        "is_success": True,
+                        "attempts": attempt,
+                        "data": result
+                    }
+
+                if attempt < self.max_retries:
+                    print("🔄 查询虽然执行成功，但结果为空，触发 Reflexion 重新审视筛选条件/连接逻辑...")
+                    memory.add_execution_feedback(
+                        "EmptyResultError",
+                        "SQL executed successfully but returned 0 rows. Re-check the filter conditions, join logic, and categorical values against the schema."
+                    )
+                else:
+                    print("💀 已达到最大重试次数，但查询结果始终为空，Agent 停止重试。")
+                    return {
+                        "final_sql": generated_sql,
+                        "is_success": False,
+                        "attempts": attempt,
+                        "error": "SQL executed successfully but returned 0 rows after all retries.",
+                        "data": result
+                    }
                 
             elif result["status"] == "error":
                 print(f"❌ 执行失败！捕获错误: {result['error_type']} - {result['error_msg']}")

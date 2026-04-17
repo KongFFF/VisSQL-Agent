@@ -1,5 +1,7 @@
+import re
 import sqlite3
 import time
+from pathlib import Path
 
 class SQLSandbox:
     def __init__(self, db_path: str, timeout: int = 5):
@@ -21,10 +23,19 @@ class SQLSandbox:
         clean_sql = sql_query.replace("```sql", "").replace("```", "").strip()
         
         start_time = time.time()
+
+        if not self._is_read_only_query(clean_sql):
+            return {
+                "status": "error",
+                "sql_executed": clean_sql,
+                "error_type": "PermissionError",
+                "error_msg": "Only read-only SELECT/WITH queries are allowed in the sandbox."
+            }
         
         try:
             # 1. 建立连接（开启 URI 模式可支持只读，此处为标准模式）
-            conn = sqlite3.connect(self.db_path, timeout=self.timeout)
+            db_uri = f"file:{Path(self.db_path).resolve().as_posix()}?mode=ro"
+            conn = sqlite3.connect(db_uri, timeout=self.timeout, uri=True)
             cursor = conn.cursor()
 
             # 2. 尝试执行大模型写的 SQL
@@ -69,6 +80,14 @@ class SQLSandbox:
                 "error_type": "SystemError",
                 "error_msg": str(e)
             }
+
+    def _is_read_only_query(self, sql_query: str) -> bool:
+        """
+        只允许执行只读查询，避免模型误写出破坏性 SQL。
+        """
+        normalized_sql = re.sub(r"/\*.*?\*/", " ", sql_query, flags=re.DOTALL)
+        normalized_sql = re.sub(r"--.*?$", " ", normalized_sql, flags=re.MULTILINE).strip()
+        return bool(re.match(r"^(SELECT|WITH)\b", normalized_sql, re.IGNORECASE))
 
 # ==========================================
 # 独立测试入口 (如果你直接运行这个脚本，它会执行这里的代码)

@@ -19,8 +19,12 @@ class CoderNode:
             trust_remote_code=True
         )
         # 2. 核心魔法：给基座模型穿上 V6 的“外骨骼装甲”
-        print(f">>> 🛡️ 正在挂载 V6 LoRA 权重: {lora_path} ...")
-        self.model = PeftModel.from_pretrained(base_model, lora_path).eval()
+        if lora_path:
+            print(f">>> 🛡️ 正在挂载 V6 LoRA 权重: {lora_path} ...")
+            self.model = PeftModel.from_pretrained(base_model, lora_path).eval()
+        else:
+            print(">>> 裸奔模式！未提供 LoRA 权重，将直接使用基座模型。")
+            self.model = base_model.eval()
         
         # 极其强硬的 System Prompt，确立 Agent 的身份和输出规范
         self.system_prompt = (
