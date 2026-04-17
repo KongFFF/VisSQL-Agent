@@ -17,6 +17,10 @@ class SQLSandbox:
             "empty_result": self._build_empty_result_probes
         }
 
+    def set_db_path(self, db_path: str):
+        """切换当前沙盒所连接的数据库。"""
+        self.db_path = db_path
+
     def execute_query(self, sql_query: str, row_limit: int = 10) -> dict:
         """
         核心执行引擎：带有极强防御性编程的 SQL 执行器。

@@ -23,86 +23,127 @@ class VisSQLAgent:
         self.max_retries = max_retries
         print("✅ 系统初始化完成，随时准备接收查询！\n")
 
-    def run_query(self, schema_info: str, user_question: str):
+    def run_query(self, schema_info: str, user_question: str, db_path: str = None, verbose: bool = True):
         """
         核心状态机（State Machine）：控制流转的生命周期。
         """
-        print(f"👤 用户提问: {user_question}")
+        def log(message: str):
+            if verbose:
+                print(message)
+
+        if db_path:
+            self.sandbox.set_db_path(db_path)
+
+        log(f"👤 用户提问: {user_question}")
         
         # 1. 初始化当前任务的“记事本”
         memory = WorkingMemory()
         memory.add_initial_query(schema_info, user_question)
+        attempt_records = []
+        probe_logs = []
 
         # ==========================================
         # 🔄 Agent 的灵魂：Reflexion (自我反思) 循环
         # ==========================================
         for attempt in range(1, self.max_retries + 1):
-            print(f"\n▶️  [第 {attempt}/{self.max_retries} 轮推理] Agent 思考中...")
+            log(f"\n▶️  [第 {attempt}/{self.max_retries} 轮推理] Agent 思考中...")
             
             # 步骤 A：经理把记事本给主厨，主厨写出 SQL
             current_messages = memory.get_current_messages()
             generated_sql = self.coder.generate(current_messages)
-            print(f"🧠 模型生成 SQL:\n{generated_sql}")
+            log(f"🧠 模型生成 SQL:\n{generated_sql}")
             
             # 步骤 B：把生成的 SQL 存入记事本
             memory.add_assistant_sql(generated_sql)
 
             # 步骤 C：经理把 SQL 丢进沙盒试运行
-            print(f"🔨 沙盒执行中...")
+            log(f"🔨 沙盒执行中...")
             result = self.sandbox.execute_query(generated_sql)
+            attempt_record = {
+                "attempt": attempt,
+                "generated_sql": generated_sql,
+                "execution_result": result
+            }
 
             # 步骤 D：命运的十字路口 (状态路由)
             if result["status"] == "success":
-                print(f"✅ 执行成功！查出 {result['row_count']} 条数据。")
-                print(f"📊 数据抽样: {result['results'][:2]}")
+                log(f"✅ 执行成功！查出 {result['row_count']} 条数据。")
+                log(f"📊 数据抽样: {result['results'][:2]}")
 
                 if result["row_count"] > 0:
+                    attempt_records.append(attempt_record)
                     return {
                         "final_sql": generated_sql,
                         "is_success": True,
                         "attempts": attempt,
-                        "data": result
+                        "data": result,
+                        "memory_messages": memory.snapshot(),
+                        "attempt_records": attempt_records,
+                        "probe_logs": probe_logs,
+                        "had_probe": bool(probe_logs),
+                        "db_path": self.sandbox.db_path
                     }
 
                 if attempt < self.max_retries:
-                    print("🔄 查询虽然执行成功，但结果为空，触发 Reflexion 重新审视筛选条件/连接逻辑...")
+                    log("🔄 查询虽然执行成功，但结果为空，触发 Reflexion 重新审视筛选条件/连接逻辑...")
                     diagnostics = self.sandbox.run_diagnostic_probes(
                         generated_sql,
                         scenario="empty_result"
                     )
+                    probe_logs.append({
+                        "attempt": attempt,
+                        "diagnostics": diagnostics
+                    })
+                    attempt_record["diagnostics"] = diagnostics
                     if diagnostics["probes"]:
-                        print("🧪 自动探测到以下诊断信息：")
-                        print(diagnostics["summary"])
+                        log("🧪 自动探测到以下诊断信息：")
+                        log(diagnostics["summary"])
                     memory.add_execution_feedback(
                         "EmptyResultError",
                         "SQL 已成功执行，但返回了 0 行结果。请重新检查筛选条件、连接逻辑，以及相关类别字段的真实取值是否与 Schema 和数据库内容一致。\n"
                         f"{diagnostics['summary']}"
                     )
+                    attempt_record["feedback_type"] = "EmptyResultError"
                 else:
-                    print("💀 已达到最大重试次数，但查询结果始终为空，Agent 停止重试。")
+                    log("💀 已达到最大重试次数，但查询结果始终为空，Agent 停止重试。")
+                    attempt_records.append(attempt_record)
                     return {
                         "final_sql": generated_sql,
                         "is_success": False,
                         "attempts": attempt,
                         "error": "SQL 已成功执行，但在所有重试轮次后仍然返回 0 行结果。",
-                        "data": result
+                        "data": result,
+                        "memory_messages": memory.snapshot(),
+                        "attempt_records": attempt_records,
+                        "probe_logs": probe_logs,
+                        "had_probe": bool(probe_logs),
+                        "db_path": self.sandbox.db_path
                     }
                 
             elif result["status"] == "error":
-                print(f"❌ 执行失败！捕获错误: {result['error_type']} - {result['error_msg']}")
+                log(f"❌ 执行失败！捕获错误: {result['error_type']} - {result['error_msg']}")
                 
                 # 如果还没到最后一次机会，就触发反思！
                 if attempt < self.max_retries:
-                    print("🔄 触发 Reflexion 机制，正在将报错记录写入 Memory 迫使模型反思...")
+                    log("🔄 触发 Reflexion 机制，正在将报错记录写入 Memory 迫使模型反思...")
                     memory.add_execution_feedback(result["error_type"], result["error_msg"])
+                    attempt_record["feedback_type"] = result["error_type"]
                 else:
-                    print("💀 已达到最大重试次数，Agent 放弃挣扎。")
+                    log("💀 已达到最大重试次数，Agent 放弃挣扎。")
+                    attempt_records.append(attempt_record)
                     return {
                         "final_sql": generated_sql,
                         "is_success": False,
                         "attempts": attempt,
-                        "error": result["error_msg"]
+                        "error": result["error_msg"],
+                        "memory_messages": memory.snapshot(),
+                        "attempt_records": attempt_records,
+                        "probe_logs": probe_logs,
+                        "had_probe": bool(probe_logs),
+                        "db_path": self.sandbox.db_path
                     }
+
+            attempt_records.append(attempt_record)
 
 # ==========================================
 # 终极实战测试入口
