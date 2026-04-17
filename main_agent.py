@@ -66,9 +66,17 @@ class VisSQLAgent:
 
                 if attempt < self.max_retries:
                     print("🔄 查询虽然执行成功，但结果为空，触发 Reflexion 重新审视筛选条件/连接逻辑...")
+                    diagnostics = self.sandbox.run_diagnostic_probes(
+                        generated_sql,
+                        scenario="empty_result"
+                    )
+                    if diagnostics["probes"]:
+                        print("🧪 自动探测到以下诊断信息：")
+                        print(diagnostics["summary"])
                     memory.add_execution_feedback(
                         "EmptyResultError",
-                        "SQL executed successfully but returned 0 rows. Re-check the filter conditions, join logic, and categorical values against the schema."
+                        "SQL 已成功执行，但返回了 0 行结果。请重新检查筛选条件、连接逻辑，以及相关类别字段的真实取值是否与 Schema 和数据库内容一致。\n"
+                        f"{diagnostics['summary']}"
                     )
                 else:
                     print("💀 已达到最大重试次数，但查询结果始终为空，Agent 停止重试。")
@@ -76,7 +84,7 @@ class VisSQLAgent:
                         "final_sql": generated_sql,
                         "is_success": False,
                         "attempts": attempt,
-                        "error": "SQL executed successfully but returned 0 rows after all retries.",
+                        "error": "SQL 已成功执行，但在所有重试轮次后仍然返回 0 行结果。",
                         "data": result
                     }
                 
