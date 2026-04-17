@@ -10,8 +10,8 @@ class WorkingMemory:
         """
         记录第一次的完整用户查询 (组装 V6 格式)
         """
-        # 将表结构和用户问题拼接，作为第一把推开大门的钥匙
-        combined_content = f"问题：{question}\n\n数据库结构：\n{schema_info}"
+        # 首轮输入严格对齐 V6 训练/推理格式：schema 在前，问题在后
+        combined_content = f"{schema_info}\n\n【问题】\n{question}"
         self.messages.append({"role": "user", "content": combined_content})
 
     def add_assistant_sql(self, sql: str):

@@ -26,14 +26,10 @@ class CoderNode:
             print(">>> 裸奔模式！未提供 LoRA 权重，将直接使用基座模型。")
             self.model = base_model.eval()
         
-        # 极其强硬的 System Prompt，确立 Agent 的身份和输出规范
+        # 与 V6 单步推理保持严格一致的 System Prompt
         self.system_prompt = (
-            "你是一个极其严谨的顶级 SQL 架构师。你的任务是根据提供的数据库结构和自然语言问题，"
-            "编写出极其准确、可以直接在 SQLite 中执行的 SQL 语句。\n"
-            "【严格指令】：\n"
-            "1. 你只能输出 SQL 代码，绝对不要输出任何自然语言解释、客套话或前置/后置说明。\n"
-            "2. 如果遇到执行报错反馈，请深刻反思并修正之前的 SQL。\n"
-            "3. 只输出最终修正后的 SQL，不要保留旧版本的代码。"
+            "你是一个顶尖的数据库架构师和SQL专家。请根据提供的数据库结构，"
+            "将用户的自然语言问题转化为精确的SQL查询语句。不要输出任何解释性的废话。"
         )
 
     def _extract_sql(self, text: str) -> str:
