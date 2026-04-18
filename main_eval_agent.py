@@ -75,6 +75,7 @@ def parse_args():
     parser.add_argument("--retrieval-min-table-score", type=float, default=1.0, help="Schema Retriever 选入种子表的最低分数")
     parser.add_argument("--retrieval-auto-threshold", type=float, default=3.0, help="auto 模式下触发子图检索的最低置信阈值")
     parser.add_argument("--schema-path-hints", action="store_true", help="是否在检索后的 schema 中附加候选连接关系与连接路径提示")
+    parser.add_argument("--schema-path-hints-selective", action="store_true", help="是否只在高结构风险题上选择性注入主路径提示")
     parser.add_argument("--progress-every", type=int, default=50, help="每多少题打印一次进度")
     parser.add_argument("--resume", action="store_true", help="从已有输出继续跑")
     parser.add_argument("--start-index", type=int, default=0, help="从第几题开始跑（0-based）")
@@ -102,13 +103,20 @@ def run_evaluation():
         db_id: render_schema_v6(schema_meta)
         for db_id, schema_meta in schema_meta_dict.items()
     }
+    if args.schema_path_hints_selective:
+        path_hint_mode = "selective"
+    elif args.schema_path_hints:
+        path_hint_mode = "all"
+    else:
+        path_hint_mode = "off"
+
     schema_retriever = SchemaRetriever(
         max_seed_tables=args.retrieval_max_seed_tables,
         max_return_tables=args.retrieval_max_return_tables,
         expand_hops=args.retrieval_expand_hops,
         min_table_score=args.retrieval_min_table_score,
         auto_mode_threshold=args.retrieval_auto_threshold,
-        include_path_hints=args.schema_path_hints,
+        path_hint_mode=path_hint_mode,
     )
 
     with dev_path.open("r", encoding="utf-8") as f:
@@ -173,7 +181,14 @@ def run_evaluation():
                     "selected_tables": list(schema_meta["table_order"]),
                     "selected_foreign_keys": [],
                     "join_paths": [],
-                    "include_path_hints": False,
+                    "path_hint_requested_mode": "off",
+                    "path_hint_applied_mode": "off",
+                    "path_hints_enabled": False,
+                    "path_hint_trigger_reasons": [],
+                    "path_hint_focus_tables": [],
+                    "path_hint_foreign_keys": [],
+                    "path_hint_join_paths": [],
+                    "path_hint_primary_join_path": [],
                     "table_scores": [],
                 }
             else:
@@ -230,7 +245,14 @@ def run_evaluation():
                     "schema_seed_tables": retrieval_info["seed_tables"],
                     "schema_selected_foreign_keys": retrieval_info["selected_foreign_keys"],
                     "schema_join_paths": retrieval_info["join_paths"],
-                    "schema_path_hints_enabled": retrieval_info["include_path_hints"],
+                    "schema_path_hint_requested_mode": retrieval_info["path_hint_requested_mode"],
+                    "schema_path_hint_applied_mode": retrieval_info["path_hint_applied_mode"],
+                    "schema_path_hints_enabled": retrieval_info["path_hints_enabled"],
+                    "schema_path_hint_trigger_reasons": retrieval_info["path_hint_trigger_reasons"],
+                    "schema_path_hint_focus_tables": retrieval_info["path_hint_focus_tables"],
+                    "schema_path_hint_foreign_keys": retrieval_info["path_hint_foreign_keys"],
+                    "schema_path_hint_join_paths": retrieval_info["path_hint_join_paths"],
+                    "schema_path_hint_primary_join_path": retrieval_info["path_hint_primary_join_path"],
                 }
             else:
                 had_reflexion = agent_result.get("attempts", 1) > 1
@@ -266,7 +288,14 @@ def run_evaluation():
                     "schema_seed_tables": retrieval_info["seed_tables"],
                     "schema_selected_foreign_keys": retrieval_info["selected_foreign_keys"],
                     "schema_join_paths": retrieval_info["join_paths"],
-                    "schema_path_hints_enabled": retrieval_info["include_path_hints"],
+                    "schema_path_hint_requested_mode": retrieval_info["path_hint_requested_mode"],
+                    "schema_path_hint_applied_mode": retrieval_info["path_hint_applied_mode"],
+                    "schema_path_hints_enabled": retrieval_info["path_hints_enabled"],
+                    "schema_path_hint_trigger_reasons": retrieval_info["path_hint_trigger_reasons"],
+                    "schema_path_hint_focus_tables": retrieval_info["path_hint_focus_tables"],
+                    "schema_path_hint_foreign_keys": retrieval_info["path_hint_foreign_keys"],
+                    "schema_path_hint_join_paths": retrieval_info["path_hint_join_paths"],
+                    "schema_path_hint_primary_join_path": retrieval_info["path_hint_primary_join_path"],
                 }
 
                 if "data" in agent_result:
