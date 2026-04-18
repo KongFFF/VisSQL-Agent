@@ -2,58 +2,21 @@ import argparse
 import json
 from pathlib import Path
 
+from schema_retriever import (
+    SchemaRetriever,
+    build_schema_metadata_dict,
+    render_schema_v6,
+)
 
 def build_schema_dict_v6(tables_path: Path) -> dict:
     """
-    解析 Spider tables.json，生成适合当前 Agent 使用的中文半结构化 schema。
+    兼容旧逻辑：解析 Spider tables.json，生成全量 schema 文本。
     """
-    with tables_path.open("r", encoding="utf-8") as f:
-        tables_data = json.load(f)
-
-    db_schemas = {}
-
-    for db in tables_data:
-        db_id = db["db_id"]
-        table_names = db["table_names_original"]
-        column_names = db["column_names_original"]
-        primary_keys = db["primary_keys"]
-        foreign_keys = db["foreign_keys"]
-
-        tables_dict = {i: [] for i in range(len(table_names))}
-        for idx, (table_idx, col_name) in enumerate(column_names):
-            if table_idx == -1:
-                continue
-            tables_dict[table_idx].append((idx, col_name))
-
-        pk_set = set(primary_keys)
-        fk_map = {src: tgt for src, tgt in foreign_keys}
-
-        schema_lines = [f"【数据库结构】\n数据库名称：{db_id}"]
-
-        for i, table_name in enumerate(table_names):
-            schema_lines.append(f"- 表：{table_name}")
-            col_descriptions = []
-
-            for col_idx, col_name in tables_dict[i]:
-                constraints = []
-                if col_idx in pk_set:
-                    constraints.append("主键")
-                if col_idx in fk_map:
-                    ref_idx = fk_map[col_idx]
-                    ref_table = table_names[column_names[ref_idx][0]]
-                    ref_col = column_names[ref_idx][1]
-                    constraints.append(f"外键指向 {ref_table}.{ref_col}")
-
-                if constraints:
-                    col_descriptions.append(f"{col_name} ({'，'.join(constraints)})")
-                else:
-                    col_descriptions.append(col_name)
-
-            schema_lines.append(f"  字段：{', '.join(col_descriptions)}")
-
-        db_schemas[db_id] = "\n".join(schema_lines)
-
-    return db_schemas
+    schema_meta_dict = build_schema_metadata_dict(tables_path)
+    return {
+        db_id: render_schema_v6(schema_meta)
+        for db_id, schema_meta in schema_meta_dict.items()
+    }
 
 
 def make_jsonable(value):
@@ -100,6 +63,17 @@ def parse_args():
     parser.add_argument("--trajectory-file", default="agent_trajectories.jsonl", help="完整轨迹日志文件名")
     parser.add_argument("--max-retries", type=int, default=3, help="Agent 最大重试轮数")
     parser.add_argument("--retry-on-empty-result", action="store_true", help="是否在空结果时触发额外的 Reflexion / probe")
+    parser.add_argument(
+        "--schema-mode",
+        choices=["full", "rag", "auto"],
+        default="full",
+        help="schema 提供方式：full=全量 schema，rag=检索子图，auto=低置信时自动回退全量 schema",
+    )
+    parser.add_argument("--retrieval-max-seed-tables", type=int, default=3, help="Schema Retriever 初始种子表上限")
+    parser.add_argument("--retrieval-max-return-tables", type=int, default=6, help="Schema Retriever 最终返回的表上限")
+    parser.add_argument("--retrieval-expand-hops", type=int, default=1, help="Schema Retriever 的 FK 邻接扩展 hop 数")
+    parser.add_argument("--retrieval-min-table-score", type=float, default=1.0, help="Schema Retriever 选入种子表的最低分数")
+    parser.add_argument("--retrieval-auto-threshold", type=float, default=3.0, help="auto 模式下触发子图检索的最低置信阈值")
     parser.add_argument("--progress-every", type=int, default=50, help="每多少题打印一次进度")
     parser.add_argument("--resume", action="store_true", help="从已有输出继续跑")
     parser.add_argument("--start-index", type=int, default=0, help="从第几题开始跑（0-based）")
@@ -108,9 +82,8 @@ def parse_args():
 
 
 def run_evaluation():
-    from main_agent import VisSQLAgent
-
     args = parse_args()
+    from main_agent import VisSQLAgent
 
     dev_path = Path(args.dev_path)
     tables_path = Path(args.tables_path)
@@ -123,7 +96,18 @@ def run_evaluation():
     trajectory_path = output_dir / args.trajectory_file
 
     print(">>> 正在加载 Spider 配置与题目集...")
-    schemas_dict = build_schema_dict_v6(tables_path)
+    schema_meta_dict = build_schema_metadata_dict(tables_path)
+    full_schema_dict = {
+        db_id: render_schema_v6(schema_meta)
+        for db_id, schema_meta in schema_meta_dict.items()
+    }
+    schema_retriever = SchemaRetriever(
+        max_seed_tables=args.retrieval_max_seed_tables,
+        max_return_tables=args.retrieval_max_return_tables,
+        expand_hops=args.retrieval_expand_hops,
+        min_table_score=args.retrieval_min_table_score,
+        auto_mode_threshold=args.retrieval_auto_threshold,
+    )
 
     with dev_path.open("r", encoding="utf-8") as f:
         dev_dataset = json.load(f)
@@ -172,7 +156,29 @@ def run_evaluation():
             db_id = item["db_id"]
             question = item["question"]
             gold_sql = item.get("query", "")
-            schema = schemas_dict.get(db_id, "")
+            schema_meta = schema_meta_dict.get(db_id)
+            if schema_meta is None:
+                raise KeyError(f"未找到数据库 {db_id} 的 schema metadata。")
+
+            if args.schema_mode == "full":
+                retrieval_info = {
+                    "schema_text": full_schema_dict[db_id],
+                    "requested_mode": "full",
+                    "applied_mode": "full",
+                    "fallback_reason": None,
+                    "question_tokens": [],
+                    "seed_tables": [],
+                    "selected_tables": list(schema_meta["table_order"]),
+                    "table_scores": [],
+                }
+            else:
+                retrieval_info = schema_retriever.retrieve(
+                    question=question,
+                    schema_meta=schema_meta,
+                    mode=args.schema_mode,
+                )
+
+            schema = retrieval_info["schema_text"]
             db_path = build_db_path(db_root, db_id)
 
             fallback_sql = "SELECT 1"
@@ -210,7 +216,13 @@ def run_evaluation():
                     "probe_scenarios": [],
                     "final_failure_type": "RuntimeError",
                     "runtime_error": runtime_error,
-                    "db_path": str(db_path)
+                    "db_path": str(db_path),
+                    "schema_mode_requested": retrieval_info["requested_mode"],
+                    "schema_mode_applied": retrieval_info["applied_mode"],
+                    "schema_fallback_reason": retrieval_info["fallback_reason"],
+                    "schema_table_count": len(retrieval_info["selected_tables"]),
+                    "schema_selected_tables": retrieval_info["selected_tables"],
+                    "schema_seed_tables": retrieval_info["seed_tables"],
                 }
             else:
                 had_reflexion = agent_result.get("attempts", 1) > 1
@@ -237,7 +249,13 @@ def run_evaluation():
                     "had_probe": had_probe,
                     "probe_scenarios": probe_scenarios,
                     "final_failure_type": final_failure_type,
-                    "db_path": agent_result.get("db_path", str(db_path))
+                    "db_path": agent_result.get("db_path", str(db_path)),
+                    "schema_mode_requested": retrieval_info["requested_mode"],
+                    "schema_mode_applied": retrieval_info["applied_mode"],
+                    "schema_fallback_reason": retrieval_info["fallback_reason"],
+                    "schema_table_count": len(retrieval_info["selected_tables"]),
+                    "schema_selected_tables": retrieval_info["selected_tables"],
+                    "schema_seed_tables": retrieval_info["seed_tables"],
                 }
 
                 if "data" in agent_result:
@@ -258,6 +276,7 @@ def run_evaluation():
                         "question": question,
                         "gold_sql": gold_sql,
                         "final_sql": clean_sql,
+                        "schema_retrieval": make_jsonable(retrieval_info),
                         "agent_result": make_jsonable(agent_result)
                     }
                     trajectory_f.write(json.dumps(trajectory_record, ensure_ascii=False) + "\n")
