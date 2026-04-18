@@ -25,7 +25,6 @@ import sqlite3
 import argparse
 
 from process_sql import get_schema, Schema, get_sql
-from exec_eval import eval_exec_match
 
 # Flag to disable value evaluation
 DISABLE_VALUE = True
@@ -501,7 +500,44 @@ def print_scores(scores, etype, include_turn_acc=True):
             print_formated_s("exact match", exact_scores, '{:<20.3f}')
 
 
-def evaluate(gold, predict, db_dir, etype, kmaps, plug_value, keep_distinct, progress_bar_for_each_datapoint):
+def load_question_metadata(dev_json):
+    if dev_json is None:
+        return {}
+
+    with open(dev_json, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return {
+        idx: {
+            "question": item.get("question"),
+            "db_id": item.get("db_id"),
+        }
+        for idx, item in enumerate(data)
+    }
+
+
+def write_error_report(error_report, error_rows):
+    if error_report is None:
+        return
+
+    with open(error_report, "w", encoding="utf-8") as f:
+        for row in error_rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def evaluate(
+    gold,
+    predict,
+    db_dir,
+    etype,
+    kmaps,
+    plug_value,
+    keep_distinct,
+    progress_bar_for_each_datapoint,
+    dev_json=None,
+    error_report=None,
+):
+    eval_exec_match = None
 
     with open(gold) as f:
         glist = []
@@ -540,12 +576,15 @@ def evaluate(gold, predict, db_dir, etype, kmaps, plug_value, keep_distinct, pro
     assert len(plist) == len(glist), "number of sessions must equal"
 
     evaluator = Evaluator()
+    question_metadata = load_question_metadata(dev_json)
     turns = ['turn 1', 'turn 2', 'turn 3', 'turn 4', 'turn > 4']
     levels = ['easy', 'medium', 'hard', 'extra', 'all', 'joint_all']
 
     partial_types = ['select', 'select(no AGG)', 'where', 'where(no OP)', 'group(no Having)',
                      'group', 'order', 'and/or', 'IUEN', 'keywords']
     entries = []
+    error_rows = []
+    question_index = 0
     scores = {}
 
     for turn in turns:
@@ -606,6 +645,9 @@ def evaluate(gold, predict, db_dir, etype, kmaps, plug_value, keep_distinct, pro
                 }
 
             if etype in ["all", "exec"]:
+                if eval_exec_match is None:
+                    from exec_eval import eval_exec_match as _eval_exec_match
+                    eval_exec_match = _eval_exec_match
                 exec_score = eval_exec_match(db=db, p_str=p_str, g_str=g_str, plug_value=plug_value,
                                              keep_distinct=keep_distinct, progress_bar_for_each_datapoint=progress_bar_for_each_datapoint)
                 if exec_score:
@@ -615,6 +657,18 @@ def evaluate(gold, predict, db_dir, etype, kmaps, plug_value, keep_distinct, pro
                     turn_scores['exec'].append(1)
                 else:
                     turn_scores['exec'].append(0)
+                    if error_report is not None:
+                        meta = question_metadata.get(question_index, {})
+                        error_rows.append({
+                            "question_index": question_index,
+                            "db_id": db_name,
+                            "question": meta.get("question"),
+                            "gold_sql": g_str,
+                            "pred_sql": p_str,
+                            "hardness": hardness,
+                            "etype": "exec",
+                            "exec_correct": False,
+                        })
 
             if etype in ["all", "match"]:
                 # rebuild sql for value evaluation
@@ -632,6 +686,19 @@ def evaluate(gold, predict, db_dir, etype, kmaps, plug_value, keep_distinct, pro
                     print("{} pred: {}".format(hardness, p_str))
                     print("{} gold: {}".format(hardness, g_str))
                     print("")
+                    if error_report is not None:
+                        meta = question_metadata.get(question_index, {})
+                        error_rows.append({
+                            "question_index": question_index,
+                            "db_id": db_name,
+                            "question": meta.get("question"),
+                            "gold_sql": g_str,
+                            "pred_sql": p_str,
+                            "hardness": hardness,
+                            "etype": "match",
+                            "exact_correct": False,
+                            "partial": partial_scores,
+                        })
                 else:
                     turn_scores['exact'].append(1)
                 scores[turn_id]['exact'] += exact_score
@@ -660,6 +727,8 @@ def evaluate(gold, predict, db_dir, etype, kmaps, plug_value, keep_distinct, pro
                     'exact': exact_score,
                     'partial': partial_scores
                 })
+
+            question_index += 1
 
         if all(v == 1 for v in turn_scores["exec"]):
             scores['joint_all']['exec'] += 1
@@ -702,6 +771,7 @@ def evaluate(gold, predict, db_dir, etype, kmaps, plug_value, keep_distinct, pro
                         2.0 * scores[level]['partial'][type_]['acc'] * scores[level]['partial'][type_]['rec'] / (
                         scores[level]['partial'][type_]['rec'] + scores[level]['partial'][type_]['acc'])
 
+    write_error_report(error_report, error_rows)
     print_scores(scores, etype, include_turn_acc=include_turn_acc)
 
 
@@ -927,6 +997,10 @@ if __name__ == "__main__":
                         help='whether to keep distinct keyword during evaluation. default is false.')
     parser.add_argument('--progress_bar_for_each_datapoint', default=False, action='store_true',
                         help='whether to print progress bar of running test inputs for each datapoint')
+    parser.add_argument('--dev-json', dest='dev_json', type=str, default=None,
+                        help='optional dev.json path, used to attach question text/index into exported wrong-case report')
+    parser.add_argument('--error-report', dest='error_report', type=str, default=None,
+                        help='optional jsonl output path for wrong-case export')
     args = parser.parse_args()
 
     # only evaluting exact match needs this argument
@@ -935,4 +1009,15 @@ if __name__ == "__main__":
         assert args.table is not None, 'table argument must be non-None if exact set match is evaluated'
         kmaps = build_foreign_key_map_from_json(args.table)
 
-    evaluate(args.gold, args.pred, args.db, args.etype, kmaps, args.plug_value, args.keep_distinct, args.progress_bar_for_each_datapoint)
+    evaluate(
+        args.gold,
+        args.pred,
+        args.db,
+        args.etype,
+        kmaps,
+        args.plug_value,
+        args.keep_distinct,
+        args.progress_bar_for_each_datapoint,
+        dev_json=args.dev_json,
+        error_report=args.error_report,
+    )
