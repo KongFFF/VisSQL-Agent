@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument("--lora-path", default=None, help="LoRA 权重路径，可为空")
     parser.add_argument("--dev-path", default="data/dev.json", help="Spider dev.json 路径")
     parser.add_argument("--tables-path", default="data/tables.json", help="Spider tables.json 路径")
-    parser.add_argument("--db-root", default="data/database", help="Spider 数据库根目录")
+    parser.add_argument("--db-root", default="data/testsuitedatabases/database", help="Spider 数据库根目录")
     parser.add_argument("--output-dir", default="eval", help="评测输出目录")
     parser.add_argument("--predict-file", default="predict_agent.txt", help="Spider 官方评测用预测文件名")
     parser.add_argument("--summary-file", default="agent_run_summary.jsonl", help="轻量摘要日志文件名")
@@ -74,6 +74,7 @@ def parse_args():
     parser.add_argument("--retrieval-expand-hops", type=int, default=1, help="Schema Retriever 的 FK 邻接扩展 hop 数")
     parser.add_argument("--retrieval-min-table-score", type=float, default=1.0, help="Schema Retriever 选入种子表的最低分数")
     parser.add_argument("--retrieval-auto-threshold", type=float, default=3.0, help="auto 模式下触发子图检索的最低置信阈值")
+    parser.add_argument("--schema-path-hints", action="store_true", help="是否在检索后的 schema 中附加候选连接关系与连接路径提示")
     parser.add_argument("--progress-every", type=int, default=50, help="每多少题打印一次进度")
     parser.add_argument("--resume", action="store_true", help="从已有输出继续跑")
     parser.add_argument("--start-index", type=int, default=0, help="从第几题开始跑（0-based）")
@@ -107,6 +108,7 @@ def run_evaluation():
         expand_hops=args.retrieval_expand_hops,
         min_table_score=args.retrieval_min_table_score,
         auto_mode_threshold=args.retrieval_auto_threshold,
+        include_path_hints=args.schema_path_hints,
     )
 
     with dev_path.open("r", encoding="utf-8") as f:
@@ -169,6 +171,9 @@ def run_evaluation():
                     "question_tokens": [],
                     "seed_tables": [],
                     "selected_tables": list(schema_meta["table_order"]),
+                    "selected_foreign_keys": [],
+                    "join_paths": [],
+                    "include_path_hints": False,
                     "table_scores": [],
                 }
             else:
@@ -223,6 +228,9 @@ def run_evaluation():
                     "schema_table_count": len(retrieval_info["selected_tables"]),
                     "schema_selected_tables": retrieval_info["selected_tables"],
                     "schema_seed_tables": retrieval_info["seed_tables"],
+                    "schema_selected_foreign_keys": retrieval_info["selected_foreign_keys"],
+                    "schema_join_paths": retrieval_info["join_paths"],
+                    "schema_path_hints_enabled": retrieval_info["include_path_hints"],
                 }
             else:
                 had_reflexion = agent_result.get("attempts", 1) > 1
@@ -256,6 +264,9 @@ def run_evaluation():
                     "schema_table_count": len(retrieval_info["selected_tables"]),
                     "schema_selected_tables": retrieval_info["selected_tables"],
                     "schema_seed_tables": retrieval_info["seed_tables"],
+                    "schema_selected_foreign_keys": retrieval_info["selected_foreign_keys"],
+                    "schema_join_paths": retrieval_info["join_paths"],
+                    "schema_path_hints_enabled": retrieval_info["include_path_hints"],
                 }
 
                 if "data" in agent_result:

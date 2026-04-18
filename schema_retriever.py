@@ -162,9 +162,96 @@ def build_schema_metadata_dict(tables_path: Path) -> dict:
     return db_schemas
 
 
-def render_schema_v6(schema_meta: dict, selected_tables: list | None = None) -> str:
+def shortest_table_path(schema_meta: dict, start: str, goal: str) -> list:
+    if start == goal:
+        return [start]
+
+    visited = {start}
+    queue = deque([(start, [start])])
+
+    while queue:
+        table_name, path = queue.popleft()
+        if len(path) > 4:
+            continue
+
+        for neighbor in schema_meta["tables"][table_name]["neighbors"]:
+            if neighbor in visited:
+                continue
+
+            next_path = path + [neighbor]
+            if neighbor == goal:
+                return next_path
+
+            visited.add(neighbor)
+            queue.append((neighbor, next_path))
+
+    return []
+
+
+def build_join_paths(schema_meta: dict, seed_tables: list) -> list:
+    if len(seed_tables) < 2:
+        return []
+
+    paths = []
+    seen = set()
+
+    for idx, left in enumerate(seed_tables):
+        for right in seed_tables[idx + 1:]:
+            path = shortest_table_path(schema_meta, left, right)
+            if len(path) < 2:
+                continue
+
+            path_key = tuple(path)
+            if path_key in seen:
+                continue
+
+            seen.add(path_key)
+            paths.append(path)
+
+    return paths
+
+
+def build_selected_fk_edges(schema_meta: dict, selected_tables: list, seed_tables: list | None = None) -> list:
+    selected_set = set(selected_tables)
+    seed_set = set(seed_tables or [])
+    join_paths = build_join_paths(schema_meta, seed_tables or [])
+
+    path_nodes = set()
+    for path in join_paths:
+        path_nodes.update(path)
+
+    edges = []
+    for edge in schema_meta["foreign_keys"]:
+        source = edge["source_table"]
+        target = edge["target_table"]
+        if source not in selected_set or target not in selected_set:
+            continue
+
+        if not path_nodes and not seed_set:
+            edges.append(edge)
+            continue
+
+        if path_nodes:
+            if source in path_nodes and target in path_nodes:
+                edges.append(edge)
+            continue
+
+        if source in seed_set or target in seed_set:
+            edges.append(edge)
+
+    return edges
+
+
+def render_schema_v6(
+    schema_meta: dict,
+    selected_tables: list | None = None,
+    seed_tables: list | None = None,
+    include_path_hints: bool = False,
+) -> str:
     if selected_tables is None:
         selected_tables = list(schema_meta["table_order"])
+    if seed_tables is None:
+        seed_tables = []
 
     selected_table_set = set(selected_tables)
     schema_lines = [f"【数据库结构】\n数据库名称：{schema_meta['db_id']}"]
@@ -194,6 +281,26 @@ def render_schema_v6(schema_meta: dict, selected_tables: list | None = None) -> 
 
         schema_lines.append(f"  字段：{', '.join(column_descriptions)}")
 
+    if include_path_hints:
+        if seed_tables:
+            schema_lines.append("【优先关注表】")
+            schema_lines.append(f"- {', '.join(seed_tables)}")
+
+        fk_edges = build_selected_fk_edges(schema_meta, selected_tables, seed_tables)
+        if fk_edges:
+            schema_lines.append("【候选连接关系】")
+            for edge in fk_edges:
+                schema_lines.append(
+                    f"- {edge['source_table']}.{edge['source_column']} = "
+                    f"{edge['target_table']}.{edge['target_column']}"
+                )
+
+        join_paths = build_join_paths(schema_meta, seed_tables)
+        if join_paths:
+            schema_lines.append("【候选连接路径】")
+            for path in join_paths:
+                schema_lines.append(f"- {' -> '.join(path)}")
+
     return "\n".join(schema_lines)
 
 
@@ -205,12 +312,14 @@ class SchemaRetriever:
         expand_hops: int = 1,
         min_table_score: float = 1.0,
         auto_mode_threshold: float = 3.0,
+        include_path_hints: bool = False,
     ):
         self.max_seed_tables = max_seed_tables
         self.max_return_tables = max_return_tables
         self.expand_hops = expand_hops
         self.min_table_score = min_table_score
         self.auto_mode_threshold = auto_mode_threshold
+        self.include_path_hints = include_path_hints
 
     def retrieve(self, question: str, schema_meta: dict, mode: str = "rag") -> dict:
         scores = self._score_tables(question, schema_meta)
@@ -240,7 +349,14 @@ class SchemaRetriever:
             applied_mode = "full"
             fallback_reason = "low_confidence"
 
-        schema_text = render_schema_v6(schema_meta, selected_tables)
+        selected_fk_edges = build_selected_fk_edges(schema_meta, selected_tables, seed_tables)
+        join_paths = [" -> ".join(path) for path in build_join_paths(schema_meta, seed_tables)]
+        schema_text = render_schema_v6(
+            schema_meta,
+            selected_tables=selected_tables,
+            seed_tables=seed_tables,
+            include_path_hints=self.include_path_hints,
+        )
         return {
             "schema_text": schema_text,
             "applied_mode": applied_mode,
@@ -249,6 +365,9 @@ class SchemaRetriever:
             "question_tokens": question_tokens(question),
             "seed_tables": seed_tables,
             "selected_tables": selected_tables,
+            "selected_foreign_keys": selected_fk_edges,
+            "join_paths": join_paths,
+            "include_path_hints": self.include_path_hints,
             "table_scores": [
                 {"table": table_name, "score": round(score, 3)}
                 for table_name, score in ranked_tables
@@ -304,34 +423,9 @@ class SchemaRetriever:
 
         for idx, left in enumerate(seed_tables):
             for right in seed_tables[idx + 1:]:
-                path = self._shortest_path(schema_meta, left, right)
+                path = shortest_table_path(schema_meta, left, right)
                 if path:
                     selected.update(path)
 
         ordered = [table for table in schema_meta["table_order"] if table in selected]
         return ordered[: self.max_return_tables]
-
-    def _shortest_path(self, schema_meta: dict, start: str, goal: str) -> list:
-        if start == goal:
-            return [start]
-
-        visited = {start}
-        queue = deque([(start, [start])])
-
-        while queue:
-            table_name, path = queue.popleft()
-            if len(path) > 4:
-                continue
-
-            for neighbor in schema_meta["tables"][table_name]["neighbors"]:
-                if neighbor in visited:
-                    continue
-
-                next_path = path + [neighbor]
-                if neighbor == goal:
-                    return next_path
-
-                visited.add(neighbor)
-                queue.append((neighbor, next_path))
-
-        return []
