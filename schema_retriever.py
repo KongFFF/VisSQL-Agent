@@ -61,6 +61,15 @@ STOPWORDS = {
     "with",
 }
 
+SELECTIVE_PATH_HINT_KEYWORDS = {
+    "across",
+    "both",
+    "each",
+    "except",
+    "not",
+    "without",
+}
+
 
 def normalize_identifier_tokens(text: str) -> list:
     normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
@@ -242,16 +251,122 @@ def build_selected_fk_edges(schema_meta: dict, selected_tables: list, seed_table
     return edges
 
 
+def build_path_edges(schema_meta: dict, path: list) -> list:
+    if len(path) < 2:
+        return []
+
+    edges = []
+    for left, right in zip(path, path[1:]):
+        for edge in schema_meta["foreign_keys"]:
+            source = edge["source_table"]
+            target = edge["target_table"]
+            if {source, target} == {left, right}:
+                edges.append(edge)
+    return edges
+
+
+def choose_primary_join_path(join_paths: list) -> list:
+    if not join_paths:
+        return []
+
+    ranked_paths = sorted(
+        join_paths,
+        key=lambda path: (-len(path), " -> ".join(path)),
+    )
+    return ranked_paths[0]
+
+
+def build_path_hint_plan(
+    question: str,
+    selected_tables: list,
+    seed_tables: list,
+    all_join_paths: list,
+    all_selected_fk_edges: list,
+    path_hint_mode: str,
+    schema_meta: dict,
+) -> dict:
+    default_plan = {
+        "requested_mode": path_hint_mode,
+        "applied_mode": "off",
+        "enabled": False,
+        "trigger_reasons": [],
+        "focus_tables": seed_tables,
+        "foreign_keys": [],
+        "join_paths": [],
+        "primary_join_path": [],
+    }
+
+    if path_hint_mode == "off":
+        return default_plan
+
+    if path_hint_mode == "all":
+        return {
+            "requested_mode": path_hint_mode,
+            "applied_mode": "all",
+            "enabled": True,
+            "trigger_reasons": ["explicit_all"],
+            "focus_tables": seed_tables,
+            "foreign_keys": all_selected_fk_edges,
+            "join_paths": [" -> ".join(path) for path in all_join_paths],
+            "primary_join_path": choose_primary_join_path(all_join_paths),
+        }
+
+    if path_hint_mode != "selective":
+        raise ValueError(f"Unsupported path hint mode: {path_hint_mode}")
+
+    trigger_reasons = []
+    if len(seed_tables) >= 2:
+        trigger_reasons.append("multi_seed")
+    if len(selected_tables) >= 4:
+        trigger_reasons.append("large_subgraph")
+    if any(len(path) >= 3 for path in all_join_paths):
+        trigger_reasons.append("multi_hop_path")
+
+    question_token_set = set(question_tokens(question))
+    keyword_hits = sorted(question_token_set & SELECTIVE_PATH_HINT_KEYWORDS)
+    if keyword_hits:
+        trigger_reasons.append(f"keywords:{','.join(keyword_hits)}")
+
+    if "multi_seed" not in trigger_reasons:
+        return default_plan
+
+    if len(trigger_reasons) == 1:
+        return default_plan
+
+    primary_join_path = choose_primary_join_path(all_join_paths)
+    primary_edges = build_path_edges(schema_meta, primary_join_path)
+    if not primary_join_path or not primary_edges:
+        return default_plan
+
+    return {
+        "requested_mode": path_hint_mode,
+        "applied_mode": "selective",
+        "enabled": True,
+        "trigger_reasons": trigger_reasons,
+        "focus_tables": seed_tables,
+        "foreign_keys": primary_edges,
+        "join_paths": [" -> ".join(primary_join_path)],
+        "primary_join_path": primary_join_path,
+    }
+
+
 def render_schema_v6(
     schema_meta: dict,
     selected_tables: list | None = None,
     seed_tables: list | None = None,
-    include_path_hints: bool = False,
+    path_hint_plan: dict | None = None,
 ) -> str:
     if selected_tables is None:
         selected_tables = list(schema_meta["table_order"])
     if seed_tables is None:
         seed_tables = []
+    if path_hint_plan is None:
+        path_hint_plan = {
+            "enabled": False,
+            "focus_tables": seed_tables,
+            "foreign_keys": [],
+            "join_paths": [],
+        }
 
     selected_table_set = set(selected_tables)
     schema_lines = [f"【数据库结构】\n数据库名称：{schema_meta['db_id']}"]
@@ -281,12 +396,13 @@ def render_schema_v6(
 
         schema_lines.append(f"  字段：{', '.join(column_descriptions)}")
 
-    if include_path_hints:
-        if seed_tables:
+    if path_hint_plan.get("enabled"):
+        focus_tables = path_hint_plan.get("focus_tables") or seed_tables
+        if focus_tables:
             schema_lines.append("【优先关注表】")
-            schema_lines.append(f"- {', '.join(seed_tables)}")
+            schema_lines.append(f"- {', '.join(focus_tables)}")
 
-        fk_edges = build_selected_fk_edges(schema_meta, selected_tables, seed_tables)
+        fk_edges = path_hint_plan.get("foreign_keys", [])
         if fk_edges:
             schema_lines.append("【候选连接关系】")
             for edge in fk_edges:
@@ -295,11 +411,11 @@ def render_schema_v6(
                     f"{edge['target_table']}.{edge['target_column']}"
                 )
 
-        join_paths = build_join_paths(schema_meta, seed_tables)
+        join_paths = path_hint_plan.get("join_paths", [])
         if join_paths:
             schema_lines.append("【候选连接路径】")
             for path in join_paths:
-                schema_lines.append(f"- {' -> '.join(path)}")
+                schema_lines.append(f"- {path}")
 
     return "\n".join(schema_lines)
 
@@ -312,14 +428,14 @@ class SchemaRetriever:
         expand_hops: int = 1,
         min_table_score: float = 1.0,
         auto_mode_threshold: float = 3.0,
-        include_path_hints: bool = False,
+        path_hint_mode: str = "off",
     ):
         self.max_seed_tables = max_seed_tables
         self.max_return_tables = max_return_tables
         self.expand_hops = expand_hops
         self.min_table_score = min_table_score
         self.auto_mode_threshold = auto_mode_threshold
-        self.include_path_hints = include_path_hints
+        self.path_hint_mode = path_hint_mode
 
     def retrieve(self, question: str, schema_meta: dict, mode: str = "rag") -> dict:
         scores = self._score_tables(question, schema_meta)
@@ -349,13 +465,22 @@ class SchemaRetriever:
             applied_mode = "full"
             fallback_reason = "low_confidence"
 
+        all_join_paths = build_join_paths(schema_meta, seed_tables)
         selected_fk_edges = build_selected_fk_edges(schema_meta, selected_tables, seed_tables)
-        join_paths = [" -> ".join(path) for path in build_join_paths(schema_meta, seed_tables)]
+        path_hint_plan = build_path_hint_plan(
+            question=question,
+            selected_tables=selected_tables,
+            seed_tables=seed_tables,
+            all_join_paths=all_join_paths,
+            all_selected_fk_edges=selected_fk_edges,
+            path_hint_mode=self.path_hint_mode,
+            schema_meta=schema_meta,
+        )
         schema_text = render_schema_v6(
             schema_meta,
             selected_tables=selected_tables,
             seed_tables=seed_tables,
-            include_path_hints=self.include_path_hints,
+            path_hint_plan=path_hint_plan,
         )
         return {
             "schema_text": schema_text,
@@ -366,8 +491,15 @@ class SchemaRetriever:
             "seed_tables": seed_tables,
             "selected_tables": selected_tables,
             "selected_foreign_keys": selected_fk_edges,
-            "join_paths": join_paths,
-            "include_path_hints": self.include_path_hints,
+            "join_paths": [" -> ".join(path) for path in all_join_paths],
+            "path_hint_requested_mode": path_hint_plan["requested_mode"],
+            "path_hint_applied_mode": path_hint_plan["applied_mode"],
+            "path_hints_enabled": path_hint_plan["enabled"],
+            "path_hint_trigger_reasons": path_hint_plan["trigger_reasons"],
+            "path_hint_focus_tables": path_hint_plan["focus_tables"],
+            "path_hint_foreign_keys": path_hint_plan["foreign_keys"],
+            "path_hint_join_paths": path_hint_plan["join_paths"],
+            "path_hint_primary_join_path": path_hint_plan["primary_join_path"],
             "table_scores": [
                 {"table": table_name, "score": round(score, 3)}
                 for table_name, score in ranked_tables
