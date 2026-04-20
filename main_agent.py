@@ -2,6 +2,7 @@ from agent_coder import CoderNode
 from agent_executor import SQLSandbox
 from agent_memory import WorkingMemory
 from selector1 import Selector1
+from selector2 import Selector2
 
 
 class VisSQLAgent:
@@ -15,6 +16,7 @@ class VisSQLAgent:
         selector1_k: int = 5,
         selector1_temperature: float = 0.7,
         selector1_top_p: float = 0.9,
+        selector_mode: str = "selector1",
     ):
         print("\n" + "=" * 50)
         print("VisSQL-Agent starting up...")
@@ -23,16 +25,25 @@ class VisSQLAgent:
         self.coder = CoderNode(base_model_path=base_model_path, lora_path=lora_path)
         self.sandbox = SQLSandbox(db_path=db_path)
         self.selector1 = Selector1(self.sandbox)
+        self.selector2 = Selector2(self.sandbox)
 
         self.max_retries = max_retries
         self.retry_on_empty_result = retry_on_empty_result
         self.selector1_k = selector1_k
         self.selector1_temperature = selector1_temperature
         self.selector1_top_p = selector1_top_p
+        self.selector_mode = selector_mode
 
         print("System initialized.")
 
-    def run_query(self, schema_info: str, user_question: str, db_path: str = None, verbose: bool = True):
+    def run_query(
+        self,
+        schema_info: str,
+        user_question: str,
+        db_path: str = None,
+        verbose: bool = True,
+        schema_meta: dict | None = None,
+    ):
         def log(message: str):
             if verbose:
                 print(message)
@@ -58,26 +69,52 @@ class VisSQLAgent:
                 top_p=self.selector1_top_p,
             )
 
-            selector1_result = self.selector1.select(candidate_sqls)
-            generated_sql = selector1_result["selected_sql"]
-            result = selector1_result["selected_execution_result"]
+            active_selector_key = self.selector_mode if self.selector_mode in {"selector1", "selector2"} else "selector1"
+            selector1_result = None
+            selector2_result = None
 
-            log("Selector 1 candidates:")
-            for candidate in selector1_result["candidates"]:
-                log(
-                    f"  - #{candidate['candidate_index']} executable={candidate['is_executable']} "
-                    f"non_empty={candidate['is_non_empty']} clauses={candidate['clause_count']} "
-                    f"len={candidate['sql_length']}"
-                )
-                log(f"    {candidate['sql']}")
+            if active_selector_key == "selector1":
+                selector1_result = self.selector1.select(candidate_sqls)
+                active_selector_result = selector1_result
+            else:
+                selector2_result = self.selector2.select(candidate_sqls, schema_meta=schema_meta)
+                active_selector_result = selector2_result
 
+            generated_sql = active_selector_result["selected_sql"]
+            result = active_selector_result["selected_execution_result"]
+
+            if active_selector_key == "selector1":
+                log("Selector 1 candidates:")
+                for candidate in active_selector_result["candidates"]:
+                    log(
+                        f"  - #{candidate['candidate_index']} executable={candidate['is_executable']} "
+                        f"non_empty={candidate['is_non_empty']} clauses={candidate['clause_count']} "
+                        f"len={candidate['sql_length']}"
+                    )
+                    log(f"    {candidate['sql']}")
+            else:
+                log("Selector 2 candidates:")
+                for candidate in active_selector_result["candidates"]:
+                    log(
+                        f"  - #{candidate['candidate_index']} score={candidate['score']} "
+                        f"executable={candidate['is_executable']} non_empty={candidate['is_non_empty']} "
+                        f"schema_valid={candidate['schema_valid']} suspicious={candidate['suspicious_structure']}"
+                    )
+                    log(f"    breakdown={candidate['score_breakdown']}")
+                    log(f"    {candidate['sql']}")
+
+            log(f"Active selector: {active_selector_key}")
             log(f"Selected SQL:\n{generated_sql}")
 
             memory.add_assistant_sql(generated_sql)
 
             attempt_record = {
                 "attempt": attempt,
+                "candidate_sqls": candidate_sqls,
                 "selector1": selector1_result,
+                "selector2": selector2_result,
+                "active_selector": active_selector_key,
+                "active_selector_result": active_selector_result,
                 "generated_sql": generated_sql,
                 "execution_result": result,
             }
@@ -103,6 +140,7 @@ class VisSQLAgent:
                             "temperature": self.selector1_temperature,
                             "top_p": self.selector1_top_p,
                         },
+                        "selector_mode": active_selector_key,
                     }
 
                 if attempt < self.max_retries:
@@ -143,6 +181,7 @@ class VisSQLAgent:
                             "temperature": self.selector1_temperature,
                             "top_p": self.selector1_top_p,
                         },
+                        "selector_mode": active_selector_key,
                     }
 
             elif result["status"] == "error":
@@ -168,6 +207,7 @@ class VisSQLAgent:
                             "temperature": self.selector1_temperature,
                             "top_p": self.selector1_top_p,
                         },
+                        "selector_mode": active_selector_key,
                     }
 
             attempt_records.append(attempt_record)

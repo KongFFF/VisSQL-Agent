@@ -67,6 +67,12 @@ def parse_args():
     parser.add_argument("--selector1-temperature", type=float, default=0.7, help="Selector 1 sampling temperature")
     parser.add_argument("--selector1-top-p", type=float, default=0.9, help="Selector 1 nucleus sampling top-p")
     parser.add_argument(
+        "--selector-mode",
+        choices=["selector1", "selector2"],
+        default="selector1",
+        help="Which parallel selector module to use for the final candidate choice",
+    )
+    parser.add_argument(
         "--schema-mode",
         choices=["full", "rag", "auto"],
         default="full",
@@ -150,6 +156,7 @@ def run_evaluation():
         selector1_k=args.selector1_k,
         selector1_temperature=args.selector1_temperature,
         selector1_top_p=args.selector1_top_p,
+        selector_mode=args.selector_mode,
     )
 
     predict_mode = "a" if args.resume and predict_path.exists() else "w"
@@ -216,7 +223,8 @@ def run_evaluation():
                     schema_info=schema,
                     user_question=question,
                     db_path=str(db_path),
-                    verbose=False
+                    verbose=False,
+                    schema_meta=schema_meta,
                 )
                 final_sql = agent_result.get("final_sql", fallback_sql)
             except Exception as e:
@@ -242,6 +250,7 @@ def run_evaluation():
                     "probe_scenarios": [],
                     "final_failure_type": "RuntimeError",
                     "runtime_error": runtime_error,
+                    "selector_mode": args.selector_mode,
                     "selector1_k": args.selector1_k,
                     "selector1_temperature": args.selector1_temperature,
                     "selector1_top_p": args.selector1_top_p,
@@ -266,7 +275,9 @@ def run_evaluation():
             else:
                 had_reflexion = agent_result.get("attempts", 1) > 1
                 had_probe = agent_result.get("had_probe", False)
-                last_selector1 = ((agent_result.get("attempt_records") or [{}])[-1]).get("selector1", {})
+                last_selector1 = ((agent_result.get("attempt_records") or [{}])[-1]).get("selector1") or {}
+                last_selector2 = ((agent_result.get("attempt_records") or [{}])[-1]).get("selector2") or {}
+                effective_selector_mode = agent_result.get("selector_mode", args.selector_mode)
                 probe_scenarios = [
                     probe_log.get("diagnostics", {}).get("scenario")
                     for probe_log in agent_result.get("probe_logs", [])
@@ -289,13 +300,19 @@ def run_evaluation():
                     "had_probe": had_probe,
                     "probe_scenarios": probe_scenarios,
                     "final_failure_type": final_failure_type,
+                    "selector_mode": effective_selector_mode,
                     "selector1_k": agent_result.get("selector1_config", {}).get("k", args.selector1_k),
                     "selector1_temperature": agent_result.get("selector1_config", {}).get("temperature", args.selector1_temperature),
                     "selector1_top_p": agent_result.get("selector1_config", {}).get("top_p", args.selector1_top_p),
-                    "selector1_candidate_count": last_selector1.get("candidate_count"),
-                    "selector1_executable_candidate_count": last_selector1.get("executable_candidate_count"),
-                    "selector1_non_empty_candidate_count": last_selector1.get("non_empty_candidate_count"),
-                    "selector1_selected_candidate_index": last_selector1.get("selected_candidate_index"),
+                    "selector1_candidate_count": last_selector1.get("candidate_count") if effective_selector_mode == "selector1" else None,
+                    "selector1_executable_candidate_count": last_selector1.get("executable_candidate_count") if effective_selector_mode == "selector1" else None,
+                    "selector1_non_empty_candidate_count": last_selector1.get("non_empty_candidate_count") if effective_selector_mode == "selector1" else None,
+                    "selector1_selected_candidate_index": last_selector1.get("selected_candidate_index") if effective_selector_mode == "selector1" else None,
+                    "selector2_candidate_count": last_selector2.get("candidate_count") if effective_selector_mode == "selector2" else None,
+                    "selector2_executable_candidate_count": last_selector2.get("executable_candidate_count") if effective_selector_mode == "selector2" else None,
+                    "selector2_non_empty_candidate_count": last_selector2.get("non_empty_candidate_count") if effective_selector_mode == "selector2" else None,
+                    "selector2_selected_candidate_index": last_selector2.get("selected_candidate_index") if effective_selector_mode == "selector2" else None,
+                    "selector2_selected_score": last_selector2.get("selected_score") if effective_selector_mode == "selector2" else None,
                     "db_path": agent_result.get("db_path", str(db_path)),
                     "schema_mode_requested": retrieval_info["requested_mode"],
                     "schema_mode_applied": retrieval_info["applied_mode"],
