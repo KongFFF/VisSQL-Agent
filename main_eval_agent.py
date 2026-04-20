@@ -120,7 +120,17 @@ def run_evaluation():
     )
 
     with dev_path.open("r", encoding="utf-8") as f:
-        dev_dataset = json.load(f)
+        dev_payload = json.load(f)
+
+    if isinstance(dev_payload, list):
+        dev_dataset = dev_payload
+    elif isinstance(dev_payload, dict) and isinstance(dev_payload.get("cases"), list):
+        dev_dataset = dev_payload["cases"]
+    else:
+        raise TypeError(
+            f"Unsupported dev dataset format in {dev_path}. "
+            "Expected a list or an object with a 'cases' list."
+        )
 
     total_count = len(dev_dataset)
     start_index = args.start_index
@@ -165,7 +175,7 @@ def run_evaluation():
             item = dev_dataset[idx]
             db_id = item["db_id"]
             question = item["question"]
-            gold_sql = item.get("query", "")
+            gold_sql = item.get("query") or item.get("gold_sql", "")
             schema_meta = schema_meta_dict.get(db_id)
             if schema_meta is None:
                 raise KeyError(f"未找到数据库 {db_id} 的 schema metadata。")
