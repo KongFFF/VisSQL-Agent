@@ -3,6 +3,7 @@ from agent_executor import SQLSandbox
 from agent_memory import WorkingMemory
 from selector1 import Selector1
 from selector2 import Selector2
+from selector3 import Selector3
 
 
 class VisSQLAgent:
@@ -26,6 +27,7 @@ class VisSQLAgent:
         self.sandbox = SQLSandbox(db_path=db_path)
         self.selector1 = Selector1(self.sandbox)
         self.selector2 = Selector2(self.sandbox)
+        self.selector3 = Selector3(self.coder, self.sandbox)
 
         self.max_retries = max_retries
         self.retry_on_empty_result = retry_on_empty_result
@@ -69,16 +71,24 @@ class VisSQLAgent:
                 top_p=self.selector1_top_p,
             )
 
-            active_selector_key = self.selector_mode if self.selector_mode in {"selector1", "selector2"} else "selector1"
+            active_selector_key = self.selector_mode if self.selector_mode in {"selector1", "selector2", "selector3"} else "selector1"
             selector1_result = None
             selector2_result = None
+            selector3_result = None
 
             if active_selector_key == "selector1":
                 selector1_result = self.selector1.select(candidate_sqls)
                 active_selector_result = selector1_result
-            else:
+            elif active_selector_key == "selector2":
                 selector2_result = self.selector2.select(candidate_sqls, schema_meta=schema_meta)
                 active_selector_result = selector2_result
+            else:
+                selector3_result = self.selector3.select(
+                    question=user_question,
+                    schema_info=schema_info,
+                    candidate_sqls=candidate_sqls,
+                )
+                active_selector_result = selector3_result
 
             generated_sql = active_selector_result["selected_sql"]
             result = active_selector_result["selected_execution_result"]
@@ -92,7 +102,7 @@ class VisSQLAgent:
                         f"len={candidate['sql_length']}"
                     )
                     log(f"    {candidate['sql']}")
-            else:
+            elif active_selector_key == "selector2":
                 log("Selector 2 candidates:")
                 for candidate in active_selector_result["candidates"]:
                     log(
@@ -102,6 +112,12 @@ class VisSQLAgent:
                     )
                     log(f"    breakdown={candidate['score_breakdown']}")
                     log(f"    {candidate['sql']}")
+            else:
+                log("Selector 3 candidates:")
+                for candidate in active_selector_result["candidates"]:
+                    log(f"  - #{candidate['candidate_index']} {candidate['sql']}")
+                log(f"    raw_output={active_selector_result['raw_model_output']}")
+                log(f"    parse_status={active_selector_result['parse_status']}")
 
             log(f"Active selector: {active_selector_key}")
             log(f"Selected SQL:\n{generated_sql}")
@@ -113,6 +129,7 @@ class VisSQLAgent:
                 "candidate_sqls": candidate_sqls,
                 "selector1": selector1_result,
                 "selector2": selector2_result,
+                "selector3": selector3_result,
                 "active_selector": active_selector_key,
                 "active_selector_result": active_selector_result,
                 "generated_sql": generated_sql,

@@ -37,13 +37,46 @@ class CoderNode:
             return match.group(1).strip()
         return text.strip()
 
-    def _build_chat_text(self, memory_messages: list) -> str:
-        full_messages = [{"role": "system", "content": self.system_prompt}] + memory_messages
+    def _build_chat_text(self, memory_messages: list, system_prompt: str | None = None) -> str:
+        full_messages = [{"role": "system", "content": system_prompt or self.system_prompt}] + memory_messages
         return self.tokenizer.apply_chat_template(
             full_messages,
             tokenize=False,
             add_generation_prompt=True,
         )
+
+    def generate_text(
+        self,
+        memory_messages: list,
+        system_prompt: str | None = None,
+        max_new_tokens: int = 64,
+        do_sample: bool = False,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+    ) -> str:
+        text = self._build_chat_text(memory_messages, system_prompt=system_prompt)
+        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+
+        generation_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": do_sample,
+            "pad_token_id": self.tokenizer.eos_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+        }
+        if do_sample:
+            generation_kwargs["temperature"] = temperature
+            generation_kwargs["top_p"] = top_p
+
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                **model_inputs,
+                **generation_kwargs,
+            )
+
+        generated_ids = [
+            output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+        ]
+        return self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
 
     def generate_candidates(
         self,
@@ -102,22 +135,11 @@ class CoderNode:
         return unique_candidates[:num_candidates]
 
     def generate(self, memory_messages: list) -> str:
-        text = self._build_chat_text(memory_messages)
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-
-        with torch.no_grad():
-            generated_ids = self.model.generate(
-                **model_inputs,
-                max_new_tokens=512,
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-            )
-
-        generated_ids = [
-            output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-        ]
-        raw_response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        raw_response = self.generate_text(
+            memory_messages,
+            max_new_tokens=512,
+            do_sample=False,
+        )
         return self._extract_sql(raw_response)
 
 

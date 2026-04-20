@@ -68,9 +68,9 @@ def parse_args():
     parser.add_argument("--selector1-top-p", type=float, default=0.9, help="Selector 1 nucleus sampling top-p")
     parser.add_argument(
         "--selector-mode",
-        choices=["selector1", "selector2"],
+        choices=["selector1", "selector2", "selector3"],
         default="selector1",
-        help="Which parallel selector module to use for the final candidate choice",
+        help="Which selector module to use for the final candidate choice",
     )
     parser.add_argument(
         "--schema-mode",
@@ -277,6 +277,7 @@ def run_evaluation():
                 had_probe = agent_result.get("had_probe", False)
                 last_selector1 = ((agent_result.get("attempt_records") or [{}])[-1]).get("selector1") or {}
                 last_selector2 = ((agent_result.get("attempt_records") or [{}])[-1]).get("selector2") or {}
+                last_selector3 = ((agent_result.get("attempt_records") or [{}])[-1]).get("selector3") or {}
                 effective_selector_mode = agent_result.get("selector_mode", args.selector_mode)
                 probe_scenarios = [
                     probe_log.get("diagnostics", {}).get("scenario")
@@ -313,6 +314,10 @@ def run_evaluation():
                     "selector2_non_empty_candidate_count": last_selector2.get("non_empty_candidate_count") if effective_selector_mode == "selector2" else None,
                     "selector2_selected_candidate_index": last_selector2.get("selected_candidate_index") if effective_selector_mode == "selector2" else None,
                     "selector2_selected_score": last_selector2.get("selected_score") if effective_selector_mode == "selector2" else None,
+                    "selector3_candidate_count": last_selector3.get("candidate_count") if effective_selector_mode == "selector3" else None,
+                    "selector3_selected_candidate_index": last_selector3.get("selected_candidate_index") if effective_selector_mode == "selector3" else None,
+                    "selector3_raw_model_output": last_selector3.get("raw_model_output") if effective_selector_mode == "selector3" else None,
+                    "selector3_parse_status": last_selector3.get("parse_status") if effective_selector_mode == "selector3" else None,
                     "db_path": agent_result.get("db_path", str(db_path)),
                     "schema_mode_requested": retrieval_info["requested_mode"],
                     "schema_mode_applied": retrieval_info["applied_mode"],
