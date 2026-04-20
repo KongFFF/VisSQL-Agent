@@ -1,8 +1,8 @@
-import time
-# 导入我们之前写好的三大组件！
 from agent_coder import CoderNode
 from agent_executor import SQLSandbox
 from agent_memory import WorkingMemory
+from selector1 import Selector1
+
 
 class VisSQLAgent:
     def __init__(
@@ -11,30 +11,28 @@ class VisSQLAgent:
         lora_path: str,
         db_path: str,
         max_retries: int = 3,
-        retry_on_empty_result: bool = False
+        retry_on_empty_result: bool = False,
+        selector1_k: int = 5,
+        selector1_temperature: float = 0.7,
+        selector1_top_p: float = 0.9,
     ):
-        """
-        初始化 Agent 大堂经理，统筹主厨(Coder)与试吃员(Sandbox)。
-        """
-        print("\n" + "="*50)
-        print("🚀 VisSQL-Agent 系统启动中...")
-        print("="*50)
-        
-        # 1. 雇佣主厨 (加载模型)
+        print("\n" + "=" * 50)
+        print("VisSQL-Agent starting up...")
+        print("=" * 50)
+
         self.coder = CoderNode(base_model_path=base_model_path, lora_path=lora_path)
-        
-        # 2. 搭建试吃沙盒 (连接数据库)
         self.sandbox = SQLSandbox(db_path=db_path)
-        
-        # 3. 设定最大反思重试次数 (防止陷入死循环)
+        self.selector1 = Selector1(self.sandbox)
+
         self.max_retries = max_retries
         self.retry_on_empty_result = retry_on_empty_result
-        print("✅ 系统初始化完成，随时准备接收查询！\n")
+        self.selector1_k = selector1_k
+        self.selector1_temperature = selector1_temperature
+        self.selector1_top_p = selector1_top_p
+
+        print("System initialized.")
 
     def run_query(self, schema_info: str, user_question: str, db_path: str = None, verbose: bool = True):
-        """
-        核心状态机（State Machine）：控制流转的生命周期。
-        """
         def log(message: str):
             if verbose:
                 print(message)
@@ -42,41 +40,51 @@ class VisSQLAgent:
         if db_path:
             self.sandbox.set_db_path(db_path)
 
-        log(f"👤 用户提问: {user_question}")
-        
-        # 1. 初始化当前任务的“记事本”
+        log(f"User question: {user_question}")
+
         memory = WorkingMemory()
         memory.add_initial_query(schema_info, user_question)
         attempt_records = []
         probe_logs = []
 
-        # ==========================================
-        # 🔄 Agent 的灵魂：Reflexion (自我反思) 循环
-        # ==========================================
         for attempt in range(1, self.max_retries + 1):
-            log(f"\n▶️  [第 {attempt}/{self.max_retries} 轮推理] Agent 思考中...")
-            
-            # 步骤 A：经理把记事本给主厨，主厨写出 SQL
+            log(f"\n[Attempt {attempt}/{self.max_retries}]")
+
             current_messages = memory.get_current_messages()
-            generated_sql = self.coder.generate(current_messages)
-            log(f"🧠 模型生成 SQL:\n{generated_sql}")
-            
-            # 步骤 B：把生成的 SQL 存入记事本
+            candidate_sqls = self.coder.generate_candidates(
+                current_messages,
+                num_candidates=self.selector1_k,
+                temperature=self.selector1_temperature,
+                top_p=self.selector1_top_p,
+            )
+
+            selector1_result = self.selector1.select(candidate_sqls)
+            generated_sql = selector1_result["selected_sql"]
+            result = selector1_result["selected_execution_result"]
+
+            log("Selector 1 candidates:")
+            for candidate in selector1_result["candidates"]:
+                log(
+                    f"  - #{candidate['candidate_index']} executable={candidate['is_executable']} "
+                    f"non_empty={candidate['is_non_empty']} clauses={candidate['clause_count']} "
+                    f"len={candidate['sql_length']}"
+                )
+                log(f"    {candidate['sql']}")
+
+            log(f"Selected SQL:\n{generated_sql}")
+
             memory.add_assistant_sql(generated_sql)
 
-            # 步骤 C：经理把 SQL 丢进沙盒试运行
-            log(f"🔨 沙盒执行中...")
-            result = self.sandbox.execute_query(generated_sql)
             attempt_record = {
                 "attempt": attempt,
+                "selector1": selector1_result,
                 "generated_sql": generated_sql,
-                "execution_result": result
+                "execution_result": result,
             }
 
-            # 步骤 D：命运的十字路口 (状态路由)
             if result["status"] == "success":
-                log(f"✅ 执行成功！查出 {result['row_count']} 条数据。")
-                log(f"📊 数据抽样: {result['results'][:2]}")
+                log(f"Execution succeeded with {result['row_count']} rows.")
+                log(f"Sample rows: {result['results'][:2]}")
 
                 if result["row_count"] > 0 or not self.retry_on_empty_result:
                     attempt_records.append(attempt_record)
@@ -89,55 +97,61 @@ class VisSQLAgent:
                         "attempt_records": attempt_records,
                         "probe_logs": probe_logs,
                         "had_probe": bool(probe_logs),
-                        "db_path": self.sandbox.db_path
+                        "db_path": self.sandbox.db_path,
+                        "selector1_config": {
+                            "k": self.selector1_k,
+                            "temperature": self.selector1_temperature,
+                            "top_p": self.selector1_top_p,
+                        },
                     }
 
                 if attempt < self.max_retries:
-                    log("🔄 查询虽然执行成功，但结果为空，触发 Reflexion 重新审视筛选条件/连接逻辑...")
+                    log("Execution returned 0 rows. Triggering empty-result reflexion.")
                     diagnostics = self.sandbox.run_diagnostic_probes(
                         generated_sql,
-                        scenario="empty_result"
+                        scenario="empty_result",
                     )
-                    probe_logs.append({
-                        "attempt": attempt,
-                        "diagnostics": diagnostics
-                    })
+                    probe_logs.append(
+                        {
+                            "attempt": attempt,
+                            "diagnostics": diagnostics,
+                        }
+                    )
                     attempt_record["diagnostics"] = diagnostics
-                    if diagnostics["probes"]:
-                        log("🧪 自动探测到以下诊断信息：")
-                        log(diagnostics["summary"])
+
                     memory.add_execution_feedback(
                         "EmptyResultError",
-                        "SQL 已成功执行，但返回了 0 行结果。请重新检查筛选条件、连接逻辑，以及相关类别字段的真实取值是否与 Schema 和数据库内容一致。\n"
-                        f"{diagnostics['summary']}"
+                        "SQL executed successfully but returned 0 rows.\n"
+                        f"{diagnostics['summary']}",
                     )
                     attempt_record["feedback_type"] = "EmptyResultError"
                 else:
-                    log("💀 已达到最大重试次数，但查询结果始终为空，Agent 停止重试。")
                     attempt_records.append(attempt_record)
                     return {
                         "final_sql": generated_sql,
                         "is_success": False,
                         "attempts": attempt,
-                        "error": "SQL 已成功执行，但在所有重试轮次后仍然返回 0 行结果。",
+                        "error": "SQL executed successfully but still returned 0 rows after all retries.",
                         "data": result,
                         "memory_messages": memory.snapshot(),
                         "attempt_records": attempt_records,
                         "probe_logs": probe_logs,
                         "had_probe": bool(probe_logs),
-                        "db_path": self.sandbox.db_path
+                        "db_path": self.sandbox.db_path,
+                        "selector1_config": {
+                            "k": self.selector1_k,
+                            "temperature": self.selector1_temperature,
+                            "top_p": self.selector1_top_p,
+                        },
                     }
-                
+
             elif result["status"] == "error":
-                log(f"❌ 执行失败！捕获错误: {result['error_type']} - {result['error_msg']}")
-                
-                # 如果还没到最后一次机会，就触发反思！
+                log(f"Execution failed: {result['error_type']} - {result['error_msg']}")
+
                 if attempt < self.max_retries:
-                    log("🔄 触发 Reflexion 机制，正在将报错记录写入 Memory 迫使模型反思...")
                     memory.add_execution_feedback(result["error_type"], result["error_msg"])
                     attempt_record["feedback_type"] = result["error_type"]
                 else:
-                    log("💀 已达到最大重试次数，Agent 放弃挣扎。")
                     attempt_records.append(attempt_record)
                     return {
                         "final_sql": generated_sql,
@@ -148,39 +162,35 @@ class VisSQLAgent:
                         "attempt_records": attempt_records,
                         "probe_logs": probe_logs,
                         "had_probe": bool(probe_logs),
-                        "db_path": self.sandbox.db_path
+                        "db_path": self.sandbox.db_path,
+                        "selector1_config": {
+                            "k": self.selector1_k,
+                            "temperature": self.selector1_temperature,
+                            "top_p": self.selector1_top_p,
+                        },
                     }
 
             attempt_records.append(attempt_record)
 
-# ==========================================
-# 终极实战测试入口
-# ==========================================
+
 if __name__ == "__main__":
-    # ⚠️ 【请在这里替换为你真实的物理路径！】
     BASE_MODEL = "/root/autodl-tmp/qwen2.5-coder-7b-instruct"
-    LORA_PATH = "/root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6"  # 如果你的 V6 是独立权重，这里填 None；如果是动态挂载，填 lora 路径
+    LORA_PATH = "/root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6"
     TEST_DB = "data/testsuitedatabases/database/concert_singer/concert_singer.sqlite"
 
-    # 1. 实例化我们的终极系统
     agent = VisSQLAgent(
-        base_model_path=BASE_MODEL, 
-        lora_path=LORA_PATH, 
-        db_path=TEST_DB, 
-        max_retries=3,  # 给它 3 次机会
-        retry_on_empty_result=True
+        base_model_path=BASE_MODEL,
+        lora_path=LORA_PATH,
+        db_path=TEST_DB,
+        max_retries=3,
+        retry_on_empty_result=True,
     )
 
-    # 2. 伪造一个极其变态的测试场景 (故意少给点信息，考验它的反思能力)
     test_schema = """
-    表 stadium (Stadium_ID [PK], Location, Name, Capacity, Highest, Lowest, Average)
-    表 singer (Singer_ID [PK], Name, Country, Song_Name, Song_release_year, Age, Is_male)
-    表 concert (concert_ID [PK], concert_Name, Theme, Stadium_ID [FK->stadium.Stadium_ID], Year)
-    表 singer_in_concert (concert_ID [FK->concert.concert_ID], Singer_ID [FK->singer.Singer_ID])
+    Table stadium (Stadium_ID [PK], Location, Name, Capacity, Highest, Lowest, Average)
+    Table singer (Singer_ID [PK], Name, Country, Song_Name, Song_release_year, Age, Is_male)
+    Table concert (concert_ID [PK], concert_Name, Theme, Stadium_ID [FK->stadium.Stadium_ID], Year)
+    Table singer_in_concert (concert_ID [FK->concert.concert_ID], Singer_ID [FK->singer.Singer_ID])
     """
-    
-    # 😈 终极陷阱：自然语言的性别陷阱
-    test_question = "列出所有女性歌手的名字和她们的歌曲名。"
-
-    # 3. 跑起来！
+    test_question = "List all female singers and their song names."
     agent.run_query(schema_info=test_schema, user_question=test_question)

@@ -63,6 +63,9 @@ def parse_args():
     parser.add_argument("--trajectory-file", default="agent_trajectories.jsonl", help="完整轨迹日志文件名")
     parser.add_argument("--max-retries", type=int, default=3, help="Agent 最大重试轮数")
     parser.add_argument("--retry-on-empty-result", action="store_true", help="是否在空结果时触发额外的 Reflexion / probe")
+    parser.add_argument("--selector1-k", type=int, default=5, help="Selector 1 candidate count per attempt")
+    parser.add_argument("--selector1-temperature", type=float, default=0.7, help="Selector 1 sampling temperature")
+    parser.add_argument("--selector1-top-p", type=float, default=0.9, help="Selector 1 nucleus sampling top-p")
     parser.add_argument(
         "--schema-mode",
         choices=["full", "rag", "auto"],
@@ -143,7 +146,10 @@ def run_evaluation():
         lora_path=args.lora_path,
         db_path=str(first_db_path),
         max_retries=args.max_retries,
-        retry_on_empty_result=args.retry_on_empty_result
+        retry_on_empty_result=args.retry_on_empty_result,
+        selector1_k=args.selector1_k,
+        selector1_temperature=args.selector1_temperature,
+        selector1_top_p=args.selector1_top_p,
     )
 
     predict_mode = "a" if args.resume and predict_path.exists() else "w"
@@ -236,6 +242,9 @@ def run_evaluation():
                     "probe_scenarios": [],
                     "final_failure_type": "RuntimeError",
                     "runtime_error": runtime_error,
+                    "selector1_k": args.selector1_k,
+                    "selector1_temperature": args.selector1_temperature,
+                    "selector1_top_p": args.selector1_top_p,
                     "db_path": str(db_path),
                     "schema_mode_requested": retrieval_info["requested_mode"],
                     "schema_mode_applied": retrieval_info["applied_mode"],
@@ -257,6 +266,7 @@ def run_evaluation():
             else:
                 had_reflexion = agent_result.get("attempts", 1) > 1
                 had_probe = agent_result.get("had_probe", False)
+                last_selector1 = ((agent_result.get("attempt_records") or [{}])[-1]).get("selector1", {})
                 probe_scenarios = [
                     probe_log.get("diagnostics", {}).get("scenario")
                     for probe_log in agent_result.get("probe_logs", [])
@@ -279,6 +289,13 @@ def run_evaluation():
                     "had_probe": had_probe,
                     "probe_scenarios": probe_scenarios,
                     "final_failure_type": final_failure_type,
+                    "selector1_k": agent_result.get("selector1_config", {}).get("k", args.selector1_k),
+                    "selector1_temperature": agent_result.get("selector1_config", {}).get("temperature", args.selector1_temperature),
+                    "selector1_top_p": agent_result.get("selector1_config", {}).get("top_p", args.selector1_top_p),
+                    "selector1_candidate_count": last_selector1.get("candidate_count"),
+                    "selector1_executable_candidate_count": last_selector1.get("executable_candidate_count"),
+                    "selector1_non_empty_candidate_count": last_selector1.get("non_empty_candidate_count"),
+                    "selector1_selected_candidate_index": last_selector1.get("selected_candidate_index"),
                     "db_path": agent_result.get("db_path", str(db_path)),
                     "schema_mode_requested": retrieval_info["requested_mode"],
                     "schema_mode_applied": retrieval_info["applied_mode"],
