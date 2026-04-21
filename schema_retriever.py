@@ -101,7 +101,6 @@ def build_schema_metadata_dict(tables_path: Path) -> dict:
         db_id = db["db_id"]
         table_names = db["table_names_original"]
         column_names = db["column_names_original"]
-        column_types = db.get("column_types", [])
         primary_keys = set(db["primary_keys"])
         foreign_keys = db["foreign_keys"]
 
@@ -127,7 +126,6 @@ def build_schema_metadata_dict(tables_path: Path) -> dict:
                     "index": col_idx,
                     "name": col_name,
                     "tokens": set(normalize_identifier_tokens(col_name)),
-                    "column_type": column_types[col_idx] if col_idx < len(column_types) else "",
                     "is_primary_key": col_idx in primary_keys,
                     "foreign_key": None,
                 }
@@ -171,89 +169,6 @@ def build_schema_metadata_dict(tables_path: Path) -> dict:
         }
 
     return db_schemas
-
-
-def build_selected_column_map(
-    schema_meta: dict,
-    selected_tables: list,
-    selected_column_map: dict | None = None,
-) -> dict[str, set[str]]:
-    normalized_map: dict[str, set[str]] = {}
-    schema_tables = schema_meta.get("tables", {})
-
-    if isinstance(selected_column_map, dict):
-        for table_name, raw_columns in selected_column_map.items():
-            if table_name not in schema_tables:
-                continue
-            if isinstance(raw_columns, (list, tuple, set)):
-                normalized_map[table_name] = {str(column).strip() for column in raw_columns if str(column).strip()}
-
-    for table_name in selected_tables:
-        if table_name not in schema_tables:
-            continue
-        if table_name not in normalized_map or not normalized_map[table_name]:
-            normalized_map[table_name] = {
-                column["name"]
-                for column in schema_tables[table_name].get("columns", [])
-            }
-
-    return normalized_map
-
-
-def ensure_key_columns_for_selected_tables(
-    schema_meta: dict,
-    selected_tables: list,
-    selected_column_map: dict | None = None,
-) -> dict[str, set[str]]:
-    normalized_map = build_selected_column_map(
-        schema_meta=schema_meta,
-        selected_tables=selected_tables,
-        selected_column_map=selected_column_map,
-    )
-
-    for table_name in selected_tables:
-        if table_name not in schema_meta.get("tables", {}):
-            continue
-        table_columns = schema_meta["tables"][table_name]["columns"]
-        for column in table_columns:
-            if column["is_primary_key"] or column["foreign_key"]:
-                normalized_map.setdefault(table_name, set()).add(column["name"])
-
-    return normalized_map
-
-
-def build_selected_columns(
-    schema_meta: dict,
-    selected_tables: list,
-    selected_column_map: dict | None = None,
-) -> list[dict]:
-    normalized_map = build_selected_column_map(
-        schema_meta=schema_meta,
-        selected_tables=selected_tables,
-        selected_column_map=selected_column_map,
-    )
-
-    selected_table_set = set(selected_tables)
-    selected_columns = []
-    for table_name in schema_meta.get("table_order", []):
-        if table_name not in selected_table_set:
-            continue
-        allowed_columns = normalized_map.get(table_name, set())
-        for column in schema_meta["tables"][table_name]["columns"]:
-            if allowed_columns and column["name"] not in allowed_columns:
-                continue
-            selected_columns.append(
-                {
-                    "table": table_name,
-                    "column": column["name"],
-                    "full_name": f"{table_name}.{column['name']}",
-                    "column_type": column.get("column_type", ""),
-                    "is_primary_key": column["is_primary_key"],
-                    "is_foreign_key": bool(column["foreign_key"]),
-                }
-            )
-
-    return selected_columns
 
 
 def shortest_table_path(schema_meta: dict, start: str, goal: str) -> list:
@@ -440,7 +355,6 @@ def render_schema_v6(
     selected_tables: list | None = None,
     seed_tables: list | None = None,
     path_hint_plan: dict | None = None,
-    selected_column_map: dict | None = None,
 ) -> str:
     if selected_tables is None:
         selected_tables = list(schema_meta["table_order"])
@@ -455,11 +369,6 @@ def render_schema_v6(
         }
 
     selected_table_set = set(selected_tables)
-    normalized_column_map = build_selected_column_map(
-        schema_meta=schema_meta,
-        selected_tables=selected_tables,
-        selected_column_map=selected_column_map,
-    )
     schema_lines = [f"【数据库结构】\n数据库名称：{schema_meta['db_id']}"]
 
     for table_name in schema_meta["table_order"]:
@@ -468,11 +377,8 @@ def render_schema_v6(
 
         schema_lines.append(f"- 表：{table_name}")
         column_descriptions = []
-        allowed_columns = normalized_column_map.get(table_name, set())
 
         for column in schema_meta["tables"][table_name]["columns"]:
-            if allowed_columns and column["name"] not in allowed_columns:
-                continue
             constraints = []
             if column["is_primary_key"]:
                 constraints.append("主键")
@@ -561,10 +467,6 @@ class SchemaRetriever:
 
         all_join_paths = build_join_paths(schema_meta, seed_tables)
         selected_fk_edges = build_selected_fk_edges(schema_meta, selected_tables, seed_tables)
-        selected_column_map = ensure_key_columns_for_selected_tables(
-            schema_meta=schema_meta,
-            selected_tables=selected_tables,
-        )
         path_hint_plan = build_path_hint_plan(
             question=question,
             selected_tables=selected_tables,
@@ -579,7 +481,6 @@ class SchemaRetriever:
             selected_tables=selected_tables,
             seed_tables=seed_tables,
             path_hint_plan=path_hint_plan,
-            selected_column_map=selected_column_map,
         )
         return {
             "schema_text": schema_text,
@@ -589,13 +490,7 @@ class SchemaRetriever:
             "question_tokens": question_tokens(question),
             "seed_tables": seed_tables,
             "selected_tables": selected_tables,
-            "selected_columns": build_selected_columns(
-                schema_meta=schema_meta,
-                selected_tables=selected_tables,
-                selected_column_map=selected_column_map,
-            ),
             "selected_foreign_keys": selected_fk_edges,
-            "selected_edges": selected_fk_edges,
             "join_paths": [" -> ".join(path) for path in all_join_paths],
             "path_hint_requested_mode": path_hint_plan["requested_mode"],
             "path_hint_applied_mode": path_hint_plan["applied_mode"],

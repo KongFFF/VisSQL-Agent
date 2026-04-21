@@ -3,12 +3,9 @@ import json
 from pathlib import Path
 
 from candidate_pool import CandidatePoolManager
-from dynamic_schema_expander import DynamicSchemaExpander
 from schema_retriever import (
     SchemaRetriever,
     build_schema_metadata_dict,
-    build_selected_columns,
-    ensure_key_columns_for_selected_tables,
     render_schema_v6,
 )
 
@@ -52,67 +49,6 @@ def count_existing_lines(file_path: Path) -> int:
 
 def should_archive_trajectory(agent_result: dict) -> bool:
     return agent_result.get("attempts", 1) > 1 or agent_result.get("had_probe", False)
-
-
-def build_full_retrieval_info(schema_meta: dict, schema_text: str) -> dict:
-    selected_tables = list(schema_meta["table_order"])
-    selected_column_map = ensure_key_columns_for_selected_tables(
-        schema_meta=schema_meta,
-        selected_tables=selected_tables,
-    )
-    selected_columns = build_selected_columns(
-        schema_meta=schema_meta,
-        selected_tables=selected_tables,
-        selected_column_map=selected_column_map,
-    )
-    return {
-        "schema_text": schema_text,
-        "requested_mode": "full",
-        "applied_mode": "full",
-        "fallback_reason": None,
-        "question_tokens": [],
-        "seed_tables": [],
-        "selected_tables": selected_tables,
-        "selected_columns": selected_columns,
-        "selected_foreign_keys": [],
-        "selected_edges": [],
-        "join_paths": [],
-        "path_hint_requested_mode": "off",
-        "path_hint_applied_mode": "off",
-        "path_hints_enabled": False,
-        "path_hint_trigger_reasons": [],
-        "path_hint_focus_tables": [],
-        "path_hint_foreign_keys": [],
-        "path_hint_join_paths": [],
-        "path_hint_primary_join_path": [],
-        "table_scores": [],
-    }
-
-
-def build_dynamic_schema_summary(retrieval_info: dict) -> dict:
-    dynamic_info = retrieval_info.get("dynamic_schema_expansion") or {}
-    return {
-        "dynamic_schema_enabled": bool(dynamic_info),
-        "dynamic_schema_attempted": dynamic_info.get("attempted"),
-        "dynamic_schema_applied": dynamic_info.get("applied"),
-        "dynamic_schema_skip_reason": dynamic_info.get("skip_reason"),
-        "dynamic_schema_added_tables": dynamic_info.get("added_tables"),
-        "dynamic_schema_bridge_added_tables": dynamic_info.get("bridge_added_tables"),
-        "dynamic_schema_metric_added_columns": dynamic_info.get("metric_added_columns"),
-        "dynamic_schema_filter_added_columns": dynamic_info.get("filter_added_columns"),
-        "dynamic_schema_gap_types": [
-            gap_name
-            for gap_name, gap_value in (dynamic_info.get("gap_signals") or {}).items()
-            if (isinstance(gap_value, list) and gap_value) or (isinstance(gap_value, dict) and gap_value.get("triggered"))
-        ],
-        "dynamic_schema_draft_sql": dynamic_info.get("draft_sql"),
-        "dynamic_schema_initial_tables": retrieval_info.get("initial_selected_tables"),
-        "dynamic_schema_initial_columns": [
-            column["full_name"]
-            for column in retrieval_info.get("initial_selected_columns", [])
-        ] if retrieval_info.get("initial_selected_columns") else None,
-        "dynamic_schema_initial_edges": retrieval_info.get("initial_selected_edges"),
-    }
 
 
 def parse_args():
@@ -161,10 +97,6 @@ def parse_args():
     parser.add_argument("--retrieval-auto-threshold", type=float, default=3.0, help="auto 模式下触发子图检索的最低置信阈值")
     parser.add_argument("--schema-path-hints", action="store_true", help="是否在检索后的 schema 中附加候选连接关系与连接路径提示")
     parser.add_argument("--schema-path-hints-selective", action="store_true", help="是否只在高结构风险题上选择性注入主路径提示")
-    parser.add_argument("--dynamic-schema-expansion", action="store_true", help="是否启用 draft-SQL-guided 的一次性动态 schema 扩展")
-    parser.add_argument("--dynamic-max-bridge-tables", type=int, default=3, help="动态 schema 扩展时最多补充多少张表")
-    parser.add_argument("--dynamic-max-added-columns", type=int, default=5, help="动态 schema 扩展时最多补充多少个 metric/filter 列")
-    parser.add_argument("--dynamic-max-candidate-tables", type=int, default=5, help="bridge gap detection 参与候选路径判断的高分表上限")
     parser.add_argument("--progress-every", type=int, default=50, help="每多少题打印一次进度")
     parser.add_argument("--resume", action="store_true", help="从已有输出继续跑")
     parser.add_argument("--start-index", type=int, default=0, help="从第几题开始跑（0-based）")
@@ -247,15 +179,6 @@ def run_evaluation():
         selector1_top_p=args.selector1_top_p,
         selector_mode=args.selector_mode,
     )
-    dynamic_schema_expander = DynamicSchemaExpander(
-        draft_sql_generator=lambda schema_text, question: agent.coder.generate(
-            [{"role": "user", "content": f"{schema_text}\n\n【问题】\n{question}"}]
-        ),
-        path_hint_mode=path_hint_mode,
-        max_bridge_tables=args.dynamic_max_bridge_tables,
-        max_added_columns=args.dynamic_max_added_columns,
-        max_candidate_tables=args.dynamic_max_candidate_tables,
-    )
 
     predict_mode = "a" if args.resume and predict_path.exists() else "w"
     summary_mode = "a" if args.resume and summary_path.exists() else "w"
@@ -282,22 +205,31 @@ def run_evaluation():
                 raise KeyError(f"未找到数据库 {db_id} 的 schema metadata。")
 
             if args.schema_mode == "full":
-                retrieval_info = build_full_retrieval_info(
-                    schema_meta=schema_meta,
-                    schema_text=full_schema_dict[db_id],
-                )
+                retrieval_info = {
+                    "schema_text": full_schema_dict[db_id],
+                    "requested_mode": "full",
+                    "applied_mode": "full",
+                    "fallback_reason": None,
+                    "question_tokens": [],
+                    "seed_tables": [],
+                    "selected_tables": list(schema_meta["table_order"]),
+                    "selected_foreign_keys": [],
+                    "join_paths": [],
+                    "path_hint_requested_mode": "off",
+                    "path_hint_applied_mode": "off",
+                    "path_hints_enabled": False,
+                    "path_hint_trigger_reasons": [],
+                    "path_hint_focus_tables": [],
+                    "path_hint_foreign_keys": [],
+                    "path_hint_join_paths": [],
+                    "path_hint_primary_join_path": [],
+                    "table_scores": [],
+                }
             else:
                 retrieval_info = schema_retriever.retrieve(
                     question=question,
                     schema_meta=schema_meta,
                     mode=args.schema_mode,
-                )
-
-            if args.dynamic_schema_expansion:
-                retrieval_info = dynamic_schema_expander.expand(
-                    question=question,
-                    schema_meta=schema_meta,
-                    initial_retrieval=retrieval_info,
                 )
 
             schema = retrieval_info["schema_text"]
@@ -366,9 +298,7 @@ def run_evaluation():
                     "schema_path_hint_foreign_keys": retrieval_info["path_hint_foreign_keys"],
                     "schema_path_hint_join_paths": retrieval_info["path_hint_join_paths"],
                     "schema_path_hint_primary_join_path": retrieval_info["path_hint_primary_join_path"],
-                    "schema_selected_columns": [column["full_name"] for column in retrieval_info.get("selected_columns", [])],
                 }
-                summary_record.update(build_dynamic_schema_summary(retrieval_info))
             else:
                 had_reflexion = agent_result.get("attempts", 1) > 1
                 had_probe = agent_result.get("had_probe", False)
@@ -437,9 +367,7 @@ def run_evaluation():
                     "schema_path_hint_foreign_keys": retrieval_info["path_hint_foreign_keys"],
                     "schema_path_hint_join_paths": retrieval_info["path_hint_join_paths"],
                     "schema_path_hint_primary_join_path": retrieval_info["path_hint_primary_join_path"],
-                    "schema_selected_columns": [column["full_name"] for column in retrieval_info.get("selected_columns", [])],
                 }
-                summary_record.update(build_dynamic_schema_summary(retrieval_info))
 
                 if "data" in agent_result:
                     summary_record["final_row_count"] = agent_result["data"].get("row_count")
@@ -452,16 +380,7 @@ def run_evaluation():
                 if had_probe:
                     probe_count += 1
 
-                dynamic_info = retrieval_info.get("dynamic_schema_expansion") or {}
-                gap_signals = dynamic_info.get("gap_signals") or {}
-                has_gap_signal = any(
-                    (isinstance(gap_value, list) and gap_value)
-                    or (isinstance(gap_value, dict) and gap_value.get("triggered"))
-                    for gap_value in gap_signals.values()
-                )
-                should_archive_dynamic = bool(dynamic_info.get("applied")) or has_gap_signal
-
-                if should_archive_trajectory(agent_result) or should_archive_dynamic:
+                if should_archive_trajectory(agent_result):
                     trajectory_record = {
                         "question_index": idx,
                         "db_id": db_id,
