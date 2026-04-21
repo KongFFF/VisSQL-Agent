@@ -2,6 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
+from candidate_pool import CandidatePoolManager
 from schema_retriever import (
     SchemaRetriever,
     build_schema_metadata_dict,
@@ -67,6 +68,17 @@ def parse_args():
     parser.add_argument("--selector1-temperature", type=float, default=0.7, help="Selector 1 sampling temperature")
     parser.add_argument("--selector1-top-p", type=float, default=0.9, help="Selector 1 nucleus sampling top-p")
     parser.add_argument(
+        "--candidate-pool-mode",
+        choices=["disabled", "generate", "generate_or_load", "load"],
+        default="disabled",
+        help="How to handle candidate pools",
+    )
+    parser.add_argument(
+        "--candidate-pool-path",
+        default=None,
+        help="Path to the candidate pool jsonl file",
+    )
+    parser.add_argument(
         "--selector-mode",
         choices=["selector1", "selector2", "selector3"],
         default="selector1",
@@ -105,6 +117,15 @@ def run_evaluation():
     predict_path = output_dir / args.predict_file
     summary_path = output_dir / args.summary_file
     trajectory_path = output_dir / args.trajectory_file
+    candidate_pool_path = Path(args.candidate_pool_path) if args.candidate_pool_path else (output_dir / "candidate_pool.jsonl")
+
+    effective_candidate_pool_mode = args.candidate_pool_mode
+    candidate_pool_manager = None
+    if effective_candidate_pool_mode != "disabled":
+        candidate_pool_manager = CandidatePoolManager(
+            path=candidate_pool_path,
+            mode=effective_candidate_pool_mode,
+        )
 
     print(">>> 正在加载 Spider 配置与题目集...")
     schema_meta_dict = build_schema_metadata_dict(tables_path)
@@ -222,9 +243,11 @@ def run_evaluation():
                 agent_result = agent.run_query(
                     schema_info=schema,
                     user_question=question,
+                    question_index=idx,
                     db_path=str(db_path),
                     verbose=False,
                     schema_meta=schema_meta,
+                    candidate_pool_manager=candidate_pool_manager,
                 )
                 final_sql = agent_result.get("final_sql", fallback_sql)
             except Exception as e:
@@ -251,6 +274,8 @@ def run_evaluation():
                     "final_failure_type": "RuntimeError",
                     "runtime_error": runtime_error,
                     "selector_mode": args.selector_mode,
+                    "candidate_pool_mode": effective_candidate_pool_mode,
+                    "candidate_pool_path": str(candidate_pool_path),
                     "selector1_k": args.selector1_k,
                     "selector1_temperature": args.selector1_temperature,
                     "selector1_top_p": args.selector1_top_p,
@@ -302,6 +327,9 @@ def run_evaluation():
                     "probe_scenarios": probe_scenarios,
                     "final_failure_type": final_failure_type,
                     "selector_mode": effective_selector_mode,
+                    "candidate_pool_mode": effective_candidate_pool_mode,
+                    "candidate_pool_path": str(candidate_pool_path),
+                    "candidate_pool_source": agent_result.get("candidate_pool_source"),
                     "selector1_k": agent_result.get("selector1_config", {}).get("k", args.selector1_k),
                     "selector1_temperature": agent_result.get("selector1_config", {}).get("temperature", args.selector1_temperature),
                     "selector1_top_p": agent_result.get("selector1_config", {}).get("top_p", args.selector1_top_p),
@@ -376,6 +404,10 @@ def run_evaluation():
     print(f">>> 预测文件: {predict_path}")
     print(f">>> 摘要日志: {summary_path}")
     print(f">>> 轨迹日志: {trajectory_path}")
+
+
+    if candidate_pool_manager is not None:
+        print(f">>> 候选池: {candidate_pool_path}")
 
 
 if __name__ == "__main__":

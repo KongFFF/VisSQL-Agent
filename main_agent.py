@@ -1,3 +1,4 @@
+from candidate_pool import CandidatePoolManager
 from agent_coder import CoderNode
 from agent_executor import SQLSandbox
 from agent_memory import WorkingMemory
@@ -42,9 +43,11 @@ class VisSQLAgent:
         self,
         schema_info: str,
         user_question: str,
+        question_index: int | None = None,
         db_path: str = None,
         verbose: bool = True,
         schema_meta: dict | None = None,
+        candidate_pool_manager: CandidatePoolManager | None = None,
     ):
         def log(message: str):
             if verbose:
@@ -64,12 +67,36 @@ class VisSQLAgent:
             log(f"\n[Attempt {attempt}/{self.max_retries}]")
 
             current_messages = memory.get_current_messages()
-            candidate_sqls = self.coder.generate_candidates(
+            generation_config = {
+                "k": self.selector1_k,
+                "temperature": self.selector1_temperature,
+                "top_p": self.selector1_top_p,
+            }
+
+            generator_fn = lambda: self.coder.generate_candidates(
                 current_messages,
-                num_candidates=self.selector1_k,
-                temperature=self.selector1_temperature,
-                top_p=self.selector1_top_p,
+                num_candidates=generation_config["k"],
+                temperature=generation_config["temperature"],
+                top_p=generation_config["top_p"],
             )
+
+            if candidate_pool_manager is not None and question_index is not None:
+                candidate_sqls, candidate_pool_meta = candidate_pool_manager.resolve_candidates(
+                    question_index=question_index,
+                    db_id=self._safe_db_id_from_schema_meta(schema_meta),
+                    question=user_question,
+                    attempt=attempt,
+                    schema_info=schema_info,
+                    memory_messages=current_messages,
+                    generator_fn=generator_fn,
+                    generation_config=generation_config,
+                )
+            else:
+                candidate_sqls = generator_fn()
+                candidate_pool_meta = {
+                    "source": "generated_no_pool_manager",
+                    "record": None,
+                }
 
             active_selector_key = self.selector_mode if self.selector_mode in {"selector1", "selector2", "selector3"} else "selector1"
             selector1_result = None
@@ -127,6 +154,7 @@ class VisSQLAgent:
             attempt_record = {
                 "attempt": attempt,
                 "candidate_sqls": candidate_sqls,
+                "candidate_pool": candidate_pool_meta,
                 "selector1": selector1_result,
                 "selector2": selector2_result,
                 "selector3": selector3_result,
@@ -157,6 +185,7 @@ class VisSQLAgent:
                             "temperature": self.selector1_temperature,
                             "top_p": self.selector1_top_p,
                         },
+                        "candidate_pool_source": candidate_pool_meta["source"],
                         "selector_mode": active_selector_key,
                     }
 
@@ -198,6 +227,7 @@ class VisSQLAgent:
                             "temperature": self.selector1_temperature,
                             "top_p": self.selector1_top_p,
                         },
+                        "candidate_pool_source": candidate_pool_meta["source"],
                         "selector_mode": active_selector_key,
                     }
 
@@ -224,10 +254,16 @@ class VisSQLAgent:
                             "temperature": self.selector1_temperature,
                             "top_p": self.selector1_top_p,
                         },
+                        "candidate_pool_source": candidate_pool_meta["source"],
                         "selector_mode": active_selector_key,
                     }
 
             attempt_records.append(attempt_record)
+
+    def _safe_db_id_from_schema_meta(self, schema_meta: dict | None) -> str:
+        if not schema_meta:
+            return ""
+        return str(schema_meta.get("db_id", ""))
 
 
 if __name__ == "__main__":
