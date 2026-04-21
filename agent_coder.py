@@ -29,6 +29,29 @@ class CoderNode:
             "Given the database schema and the user question, produce a precise SQL query. "
             "Output SQL only, without explanation."
         )
+        self.candidate_prompt_variants = [
+            {
+                "name": "normal",
+                "instruction": (
+                    "Generate one valid SQL candidate for the question. "
+                    "Use your default strategy. Output SQL only."
+                ),
+            },
+            {
+                "name": "subquery",
+                "instruction": (
+                    "Generate one valid SQL candidate for the question. "
+                    "Prefer a subquery-based strategy when reasonable. Output SQL only."
+                ),
+            },
+            {
+                "name": "join",
+                "instruction": (
+                    "Generate one valid SQL candidate for the question. "
+                    "Prefer an explicit join-based strategy when reasonable. Output SQL only."
+                ),
+            },
+        ]
 
     def _extract_sql(self, text: str) -> str:
         pattern = r"```(?:sql)?\s*(.*?)\s*```"
@@ -44,6 +67,54 @@ class CoderNode:
             tokenize=False,
             add_generation_prompt=True,
         )
+
+    def _build_variant_messages(self, memory_messages: list, variant_instruction: str | None = None) -> list:
+        if not variant_instruction:
+            return list(memory_messages)
+        return list(memory_messages) + [{"role": "user", "content": variant_instruction}]
+
+    def _allocate_counts_across_variants(self, total_count: int, variant_count: int) -> list[int]:
+        if total_count <= 0 or variant_count <= 0:
+            return []
+        base = total_count // variant_count
+        remainder = total_count % variant_count
+        counts = [base] * variant_count
+        for idx in range(remainder):
+            counts[idx] += 1
+        return counts
+
+    def _sample_variant_candidates(
+        self,
+        memory_messages: list,
+        variant_instruction: str | None,
+        raw_sequence_count: int,
+        temperature: float,
+        top_p: float,
+        max_new_tokens: int,
+    ) -> list[str]:
+        if raw_sequence_count <= 0:
+            return []
+
+        variant_messages = self._build_variant_messages(memory_messages, variant_instruction)
+        text = self._build_chat_text(variant_messages)
+        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+        prompt_length = model_inputs.input_ids.shape[1]
+
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                **model_inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=temperature,
+                top_p=top_p,
+                num_return_sequences=raw_sequence_count,
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+
+        completion_ids = generated_ids[:, prompt_length:]
+        raw_responses = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
+        return [self._extract_sql(raw_response) for raw_response in raw_responses]
 
     def generate_text(
         self,
@@ -111,16 +182,15 @@ class CoderNode:
                 "raw_budget_used": 0,
                 "raw_budget_limit": max_raw_budget,
                 "raw_generation_rounds": 0,
+                "prompt_strategy": "multi_prompt",
+                "prompt_variants_used": [variant["name"] for variant in self.candidate_prompt_variants],
             }
-
-        text = self._build_chat_text(memory_messages)
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-        prompt_length = model_inputs.input_ids.shape[1]
 
         unique_candidates = []
         seen = set()
         raw_budget_used = 0
         raw_generation_rounds = 0
+        prompt_variant_raw_counts = {variant["name"]: 0 for variant in self.candidate_prompt_variants}
 
         while len(unique_candidates) < num_candidates and raw_budget_used < max_raw_budget:
             remaining_budget = max_raw_budget - raw_budget_used
@@ -132,31 +202,35 @@ class CoderNode:
 
             if raw_sequence_count <= 0:
                 break
+            raw_generation_rounds += 1
+            per_variant_counts = self._allocate_counts_across_variants(
+                raw_sequence_count,
+                len(self.candidate_prompt_variants),
+            )
 
-            with torch.no_grad():
-                generated_ids = self.model.generate(
-                    **model_inputs,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=True,
+            for variant, variant_raw_count in zip(self.candidate_prompt_variants, per_variant_counts):
+                if variant_raw_count <= 0:
+                    continue
+                raw_candidates = self._sample_variant_candidates(
+                    memory_messages=memory_messages,
+                    variant_instruction=variant["instruction"],
+                    raw_sequence_count=variant_raw_count,
                     temperature=temperature,
                     top_p=top_p,
-                    num_return_sequences=raw_sequence_count,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
+                    max_new_tokens=max_new_tokens,
                 )
+                raw_budget_used += variant_raw_count
+                prompt_variant_raw_counts[variant["name"]] += variant_raw_count
 
-            completion_ids = generated_ids[:, prompt_length:]
-            raw_responses = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
-            raw_budget_used += raw_sequence_count
-            raw_generation_rounds += 1
+                for clean_sql in raw_candidates:
+                    normalized_sql = " ".join(clean_sql.split()).lower()
+                    if not clean_sql or normalized_sql in seen:
+                        continue
+                    seen.add(normalized_sql)
+                    unique_candidates.append(clean_sql)
+                    if len(unique_candidates) >= num_candidates:
+                        break
 
-            for raw_response in raw_responses:
-                clean_sql = self._extract_sql(raw_response)
-                normalized_sql = " ".join(clean_sql.split()).lower()
-                if not clean_sql or normalized_sql in seen:
-                    continue
-                seen.add(normalized_sql)
-                unique_candidates.append(clean_sql)
                 if len(unique_candidates) >= num_candidates:
                     break
 
@@ -164,6 +238,7 @@ class CoderNode:
             deterministic_sql = self.generate(memory_messages)
             if deterministic_sql:
                 unique_candidates.append(deterministic_sql)
+                prompt_variant_raw_counts["normal"] = prompt_variant_raw_counts.get("normal", 0)
 
         candidate_shortage = len(unique_candidates) < num_candidates
         return {
@@ -172,6 +247,9 @@ class CoderNode:
             "raw_budget_used": raw_budget_used,
             "raw_budget_limit": max_raw_budget,
             "raw_generation_rounds": raw_generation_rounds,
+            "prompt_strategy": "multi_prompt",
+            "prompt_variants_used": [variant["name"] for variant in self.candidate_prompt_variants],
+            "prompt_variant_raw_counts": prompt_variant_raw_counts,
         }
 
     def generate(self, memory_messages: list) -> str:

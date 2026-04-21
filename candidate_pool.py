@@ -82,6 +82,9 @@ class CandidatePoolManager:
                 "raw_budget_used": generated_bundle.get("raw_budget_used"),
                 "raw_budget_limit": generated_bundle.get("raw_budget_limit"),
                 "raw_generation_rounds": generated_bundle.get("raw_generation_rounds"),
+                "prompt_strategy": generated_bundle.get("prompt_strategy"),
+                "prompt_variants_used": generated_bundle.get("prompt_variants_used"),
+                "prompt_variant_raw_counts": generated_bundle.get("prompt_variant_raw_counts"),
             }
             self._append_record(record)
             self.records[key] = record
@@ -105,6 +108,9 @@ class CandidatePoolManager:
             "raw_budget_used": generated_bundle.get("raw_budget_used"),
             "raw_budget_limit": generated_bundle.get("raw_budget_limit"),
             "raw_generation_rounds": generated_bundle.get("raw_generation_rounds"),
+            "prompt_strategy": generated_bundle.get("prompt_strategy"),
+            "prompt_variants_used": generated_bundle.get("prompt_variants_used"),
+            "prompt_variant_raw_counts": generated_bundle.get("prompt_variant_raw_counts"),
         }
         self._append_record(record)
         self.records[key] = record

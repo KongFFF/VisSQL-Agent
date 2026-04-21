@@ -71,6 +71,8 @@ class VisSQLAgent:
                 "k": self.selector1_k,
                 "temperature": self.selector1_temperature,
                 "top_p": self.selector1_top_p,
+                "candidate_strategy": "multi_prompt",
+                "prompt_variants": ["normal", "subquery", "join"],
             }
 
             generator_fn = lambda: self.coder.generate_candidate_bundle(
