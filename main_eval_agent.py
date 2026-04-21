@@ -64,7 +64,7 @@ def parse_args():
     parser.add_argument("--trajectory-file", default="agent_trajectories.jsonl", help="完整轨迹日志文件名")
     parser.add_argument("--max-retries", type=int, default=1, help="Agent 最大重试轮数")
     parser.add_argument("--retry-on-empty-result", action="store_true", help="是否在空结果时触发额外的 Reflexion / probe")
-    parser.add_argument("--selector1-k", type=int, default=5, help="Selector 1 candidate count per attempt")
+    parser.add_argument("--selector1-k", type=int, default=3, help="Selector 1 candidate count per attempt")
     parser.add_argument("--selector1-temperature", type=float, default=0.7, help="Selector 1 sampling temperature")
     parser.add_argument("--selector1-top-p", type=float, default=0.9, help="Selector 1 nucleus sampling top-p")
     parser.add_argument(

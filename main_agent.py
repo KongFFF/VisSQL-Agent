@@ -15,7 +15,7 @@ class VisSQLAgent:
         db_path: str,
         max_retries: int = 1,
         retry_on_empty_result: bool = False,
-        selector1_k: int = 5,
+        selector1_k: int = 3,
         selector1_temperature: float = 0.7,
         selector1_top_p: float = 0.9,
         selector_mode: str = "selector3",
