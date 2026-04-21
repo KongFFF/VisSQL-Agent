@@ -173,7 +173,7 @@ class CoderNode:
         top_p: float = 0.9,
         max_new_tokens: int = 512,
         initial_raw_count: int = 10,
-        max_raw_budget: int = 30,
+        max_raw_budget: int = 15,
     ) -> dict:
         if num_candidates <= 0:
             return {
