@@ -73,7 +73,7 @@ class VisSQLAgent:
                 "top_p": self.selector1_top_p,
             }
 
-            generator_fn = lambda: self.coder.generate_candidates(
+            generator_fn = lambda: self.coder.generate_candidate_bundle(
                 current_messages,
                 num_candidates=generation_config["k"],
                 temperature=generation_config["temperature"],
@@ -92,10 +92,11 @@ class VisSQLAgent:
                     generation_config=generation_config,
                 )
             else:
-                candidate_sqls = generator_fn()
+                generated_bundle = generator_fn()
+                candidate_sqls = list(generated_bundle.get("candidate_sqls", []))
                 candidate_pool_meta = {
                     "source": "generated_no_pool_manager",
-                    "record": None,
+                    "record": generated_bundle,
                 }
 
             active_selector_key = self.selector_mode if self.selector_mode in {"selector1", "selector2", "selector3"} else "selector1"
@@ -186,6 +187,7 @@ class VisSQLAgent:
                             "top_p": self.selector1_top_p,
                         },
                         "candidate_pool_source": candidate_pool_meta["source"],
+                        "candidate_shortage": (candidate_pool_meta.get("record") or {}).get("candidate_shortage", False),
                         "selector_mode": active_selector_key,
                     }
 
@@ -228,6 +230,7 @@ class VisSQLAgent:
                             "top_p": self.selector1_top_p,
                         },
                         "candidate_pool_source": candidate_pool_meta["source"],
+                        "candidate_shortage": (candidate_pool_meta.get("record") or {}).get("candidate_shortage", False),
                         "selector_mode": active_selector_key,
                     }
 
@@ -255,6 +258,7 @@ class VisSQLAgent:
                             "top_p": self.selector1_top_p,
                         },
                         "candidate_pool_source": candidate_pool_meta["source"],
+                        "candidate_shortage": (candidate_pool_meta.get("record") or {}).get("candidate_shortage", False),
                         "selector_mode": active_selector_key,
                     }
 

@@ -41,7 +41,7 @@ class CandidatePoolManager:
         attempt: int,
         schema_info: str,
         memory_messages: list[dict[str, Any]],
-        generator_fn: Callable[[], list[str]],
+        generator_fn: Callable[[], dict[str, Any]],
         generation_config: dict[str, Any],
     ) -> tuple[list[str], dict[str, Any]]:
         memory_state_hash = build_memory_state_hash(memory_messages)
@@ -60,14 +60,14 @@ class CandidatePoolManager:
                     f"Candidate pool missing for question_index={question_index}, attempt={attempt}, "
                     f"memory_state_hash={memory_state_hash}"
                 )
-            candidates = generator_fn()
-            return candidates, {
+            generated_bundle = generator_fn()
+            return list(generated_bundle.get("candidate_sqls", [])), {
                 "source": "generated_no_cache",
-                "record": None,
+                "record": generated_bundle,
             }
 
         if self.mode == "generate_or_load":
-            candidates = generator_fn()
+            generated_bundle = generator_fn()
             record = {
                 "question_index": int(question_index),
                 "db_id": db_id,
@@ -77,16 +77,20 @@ class CandidatePoolManager:
                 "memory_message_count": len(memory_messages),
                 "schema_hash": hashlib.sha256(schema_info.encode("utf-8")).hexdigest(),
                 "generation_config": generation_config,
-                "candidate_sqls": candidates,
+                "candidate_sqls": generated_bundle.get("candidate_sqls", []),
+                "candidate_shortage": generated_bundle.get("candidate_shortage", False),
+                "raw_budget_used": generated_bundle.get("raw_budget_used"),
+                "raw_budget_limit": generated_bundle.get("raw_budget_limit"),
+                "raw_generation_rounds": generated_bundle.get("raw_generation_rounds"),
             }
             self._append_record(record)
             self.records[key] = record
-            return list(candidates), {
+            return list(record["candidate_sqls"]), {
                 "source": "generated_and_saved",
                 "record": record,
             }
 
-        candidates = generator_fn()
+        generated_bundle = generator_fn()
         record = {
             "question_index": int(question_index),
             "db_id": db_id,
@@ -96,11 +100,15 @@ class CandidatePoolManager:
             "memory_message_count": len(memory_messages),
             "schema_hash": hashlib.sha256(schema_info.encode("utf-8")).hexdigest(),
             "generation_config": generation_config,
-            "candidate_sqls": candidates,
+            "candidate_sqls": generated_bundle.get("candidate_sqls", []),
+            "candidate_shortage": generated_bundle.get("candidate_shortage", False),
+            "raw_budget_used": generated_bundle.get("raw_budget_used"),
+            "raw_budget_limit": generated_bundle.get("raw_budget_limit"),
+            "raw_generation_rounds": generated_bundle.get("raw_generation_rounds"),
         }
         self._append_record(record)
         self.records[key] = record
-        return list(candidates), {
+        return list(record["candidate_sqls"]), {
             "source": "generated_and_saved",
             "record": record,
         }

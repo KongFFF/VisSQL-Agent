@@ -86,53 +86,93 @@ class CoderNode:
         top_p: float = 0.9,
         max_new_tokens: int = 512,
     ) -> list[str]:
+        return self.generate_candidate_bundle(
+            memory_messages=memory_messages,
+            num_candidates=num_candidates,
+            temperature=temperature,
+            top_p=top_p,
+            max_new_tokens=max_new_tokens,
+        )["candidate_sqls"]
+
+    def generate_candidate_bundle(
+        self,
+        memory_messages: list,
+        num_candidates: int = 5,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        max_new_tokens: int = 512,
+        initial_raw_count: int = 10,
+        max_raw_budget: int = 30,
+    ) -> dict:
         if num_candidates <= 0:
-            return []
+            return {
+                "candidate_sqls": [],
+                "candidate_shortage": False,
+                "raw_budget_used": 0,
+                "raw_budget_limit": max_raw_budget,
+                "raw_generation_rounds": 0,
+            }
 
         text = self._build_chat_text(memory_messages)
         model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-
-        # Oversample a bit, then deduplicate to increase candidate diversity.
-        raw_sequence_count = min(max(num_candidates * 2, num_candidates), 10)
-
-        with torch.no_grad():
-            generated_ids = self.model.generate(
-                **model_inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                top_p=top_p,
-                num_return_sequences=raw_sequence_count,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-            )
-
         prompt_length = model_inputs.input_ids.shape[1]
-        completion_ids = generated_ids[:, prompt_length:]
-        raw_responses = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
 
         unique_candidates = []
         seen = set()
-        for raw_response in raw_responses:
-            clean_sql = self._extract_sql(raw_response)
-            normalized_sql = " ".join(clean_sql.split()).lower()
-            if not clean_sql or normalized_sql in seen:
-                continue
-            seen.add(normalized_sql)
-            unique_candidates.append(clean_sql)
-            if len(unique_candidates) >= num_candidates:
+        raw_budget_used = 0
+        raw_generation_rounds = 0
+
+        while len(unique_candidates) < num_candidates and raw_budget_used < max_raw_budget:
+            remaining_budget = max_raw_budget - raw_budget_used
+            if raw_generation_rounds == 0:
+                raw_sequence_count = min(initial_raw_count, remaining_budget)
+            else:
+                needed = max(num_candidates - len(unique_candidates), 1)
+                raw_sequence_count = min(max(needed * 2, 2), remaining_budget)
+
+            if raw_sequence_count <= 0:
                 break
 
-        if not unique_candidates:
-            return [self.generate(memory_messages)]
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    **model_inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=temperature,
+                    top_p=top_p,
+                    num_return_sequences=raw_sequence_count,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                )
 
-        if len(unique_candidates) < num_candidates:
+            completion_ids = generated_ids[:, prompt_length:]
+            raw_responses = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
+            raw_budget_used += raw_sequence_count
+            raw_generation_rounds += 1
+
+            for raw_response in raw_responses:
+                clean_sql = self._extract_sql(raw_response)
+                normalized_sql = " ".join(clean_sql.split()).lower()
+                if not clean_sql or normalized_sql in seen:
+                    continue
+                seen.add(normalized_sql)
+                unique_candidates.append(clean_sql)
+                if len(unique_candidates) >= num_candidates:
+                    break
+
+        if not unique_candidates:
             deterministic_sql = self.generate(memory_messages)
-            normalized_sql = " ".join(deterministic_sql.split()).lower()
-            if deterministic_sql and normalized_sql not in seen:
+            if deterministic_sql:
                 unique_candidates.append(deterministic_sql)
 
-        return unique_candidates[:num_candidates]
+        candidate_shortage = len(unique_candidates) < num_candidates
+        return {
+            "candidate_sqls": unique_candidates[:num_candidates],
+            "candidate_shortage": candidate_shortage,
+            "raw_budget_used": raw_budget_used,
+            "raw_budget_limit": max_raw_budget,
+            "raw_generation_rounds": raw_generation_rounds,
+        }
 
     def generate(self, memory_messages: list) -> str:
         raw_response = self.generate_text(
