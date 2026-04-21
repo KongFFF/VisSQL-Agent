@@ -62,7 +62,7 @@ def parse_args():
     parser.add_argument("--predict-file", default="predict_agent.txt", help="Spider 官方评测用预测文件名")
     parser.add_argument("--summary-file", default="agent_run_summary.jsonl", help="轻量摘要日志文件名")
     parser.add_argument("--trajectory-file", default="agent_trajectories.jsonl", help="完整轨迹日志文件名")
-    parser.add_argument("--max-retries", type=int, default=3, help="Agent 最大重试轮数")
+    parser.add_argument("--max-retries", type=int, default=1, help="Agent 最大重试轮数")
     parser.add_argument("--retry-on-empty-result", action="store_true", help="是否在空结果时触发额外的 Reflexion / probe")
     parser.add_argument("--selector1-k", type=int, default=5, help="Selector 1 candidate count per attempt")
     parser.add_argument("--selector1-temperature", type=float, default=0.7, help="Selector 1 sampling temperature")
@@ -81,8 +81,8 @@ def parse_args():
     parser.add_argument(
         "--selector-mode",
         choices=["selector1", "selector2", "selector3"],
-        default="selector1",
-        help="Which selector module to use for the final candidate choice",
+        default="selector3",
+        help="Which selector module to use for the final candidate choice (default: selector3)",
     )
     parser.add_argument(
         "--schema-mode",
