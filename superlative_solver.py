@@ -45,7 +45,17 @@ COUNT_CUES = [
     "most number of",
     "fewest number of",
     "least number of",
+    "highest number of",
+    "lowest number of",
+    "largest number of",
+    "smallest number of",
+    "highest count of",
+    "lowest count of",
+    "largest count of",
+    "smallest count of",
     "most common",
+    "most frequent",
+    "least frequent",
 ]
 
 VALUE_CUES = [
@@ -87,9 +97,15 @@ AGG_CUES = [
 TOP1_CUES = [
     "most number of",
     "least number of",
+    "highest number of",
+    "lowest number of",
+    "largest number of",
+    "smallest number of",
     "the most",
     "the fewest",
     "most common",
+    "most frequent",
+    "least frequent",
 ]
 
 NUMBER_WORDS = {
@@ -109,6 +125,7 @@ TEMPLATE_ORDER = [
     "ORDER_BY",
     "NESTED",
     "GROUP_COUNT_TOP1",
+    "JOIN_GROUP_COUNT_TOP1",
     "JOIN_ORDER_BY",
 ]
 
@@ -116,6 +133,7 @@ TEMPLATE_DESCRIPTIONS = {
     "ORDER_BY": "Single-table top-1 object retrieval via ORDER BY ... LIMIT 1.",
     "NESTED": "Single-table extrema object retrieval via nested MIN/MAX comparison.",
     "GROUP_COUNT_TOP1": "Top-1 group by count via GROUP BY ... ORDER BY COUNT(*) ... LIMIT 1.",
+    "JOIN_GROUP_COUNT_TOP1": "Top-1 entity by related row count via JOIN + GROUP BY + COUNT(*) + ORDER BY + LIMIT 1.",
     "JOIN_ORDER_BY": "Single-hop join object retrieval where target and measure are on different tables.",
 }
 
@@ -201,6 +219,14 @@ def _normalize_join_clause(join_clause):
     if not join_clause:
         return ""
     return re.sub(r"^\s*join\s+", "JOIN ", join_clause, flags=re.I).strip()
+
+
+def _contains_any_regex(text, patterns):
+    return any(re.search(pattern, text, flags=re.I) for pattern in patterns)
+
+
+def _extract_qualified_identifiers(expr):
+    return re.findall(r"\b([A-Za-z_][\w]*)\.([A-Za-z_][\w]*)\b", _clean_optional_text(expr))
 
 
 def _parse_json_like(text):
@@ -366,6 +392,19 @@ class SQLiteSchemaGraph:
                 direct_edges += 1
 
         return direct_edges == 1
+
+    def has_direct_fk_path(self, left_table, right_table):
+        left = self.canonical_table_name(left_table)
+        right = self.canonical_table_name(right_table)
+        if not left or not right or left == right:
+            return False
+
+        for edge in self.foreign_keys:
+            source = edge["source_table"].lower()
+            target = edge["target_table"].lower()
+            if {source, target} == {left, right}:
+                return True
+        return False
 
 
 class SuperlativePatternSolver:
@@ -610,6 +649,8 @@ Rules:
         all_template_scores = ",\n    ".join(f'"{name}": 0.0' for name in TEMPLATE_ORDER)
         signal_lines = [
             f"- is_count_superlative: {str(is_count_superlative(question)).lower()}",
+            f"- is_group_count_superlative: {str(is_group_count_superlative(question, slot_hint)).lower()}",
+            f"- is_join_group_count_superlative: {str(is_join_group_count_superlative(question, slot_hint, schema)).lower()}",
             f"- is_single_hop_join_superlative: {str(is_single_hop_join_superlative(slot_hint, schema)).lower()}",
             f"- looks_like_nested_extrema: {str(any(token in question.lower() for token in ['minimum', 'smallest'])).lower()}",
             f"- target_table: {slot_hint.get('target_table', '')}",
@@ -632,7 +673,7 @@ Structural signals:
 Return JSON with this format:
 {{
   "use_template_score": 0.0,
-  "selected_template": "ORDER_BY | NESTED | GROUP_COUNT_TOP1 | JOIN_ORDER_BY | FALLBACK",
+  "selected_template": "ORDER_BY | NESTED | GROUP_COUNT_TOP1 | JOIN_GROUP_COUNT_TOP1 | JOIN_ORDER_BY | FALLBACK",
   "template_scores": {{
     {all_template_scores}
   }},
@@ -719,6 +760,16 @@ Rules:
   "order": "ASC or DESC",
   "condition": ""
 }"""
+        elif template == "JOIN_GROUP_COUNT_TOP1":
+            slot_schema = """{
+  "target": "",
+  "entity_table": "",
+  "fact_table": "",
+  "join_on": "",
+  "group_key": "",
+  "order": "ASC or DESC",
+  "condition": ""
+}"""
         elif template == "JOIN_ORDER_BY":
             slot_schema = """{
   "target": "",
@@ -747,6 +798,8 @@ Return JSON with this exact format:
 Rules:
 - Use only valid table names and column names from the schema.
 - Keep condition empty when no WHERE clause is needed.
+- For GROUP_COUNT_TOP1, use it only when target and group_key both come from the grouped source side. Use join_clause only when a join is needed for filtering or context.
+- For JOIN_GROUP_COUNT_TOP1, use it when the final target belongs to an entity table but the count happens on a related fact table. In this case target and group_key should come from entity_table.
 - Do not output SQL.
 - Output JSON only.
 """
@@ -844,6 +897,25 @@ def is_count_superlative(question):
     return is_superlative(q) and any(cue in q for cue in COUNT_CUES)
 
 
+def is_group_count_superlative(question, slot_hint=None):
+    q = question.lower()
+    if is_count_superlative(q):
+        return True
+
+    soft_count_patterns = [
+        r"\bhas\s+the\s+(most|fewest|least|greatest|highest|lowest|largest|smallest)\b",
+        r"\bwith\s+the\s+(most|fewest|least|greatest|highest|lowest|largest|smallest)\b",
+        r"\b(the|which|what)\b.*\b(most|fewest|least|greatest|highest|lowest|largest|smallest)\b",
+    ]
+    if _contains_any_regex(q, soft_count_patterns):
+        if slot_hint is None:
+            return True
+        if slot_hint.get("needs_group_by"):
+            return True
+
+    return False
+
+
 def uses_phase0_exclusion_layer(mode):
     mode = (mode or "v1").lower()
     return mode in {"phase0", "v2", "phase1"}
@@ -880,7 +952,10 @@ def get_candidate_templates(question, slot_hint, schema):
     q = question.lower()
     candidates = []
 
-    if is_count_superlative(q):
+    if is_join_group_count_superlative(question, slot_hint, schema):
+        candidates.append("JOIN_GROUP_COUNT_TOP1")
+
+    if is_group_count_superlative(q, slot_hint):
         candidates.append("GROUP_COUNT_TOP1")
 
     if is_single_hop_join_superlative(slot_hint, schema):
@@ -896,6 +971,21 @@ def get_candidate_templates(question, slot_hint, schema):
         if name not in deduped:
             deduped.append(name)
     return deduped
+
+
+def is_join_group_count_superlative(question, slot_hint, schema):
+    if not is_group_count_superlative(question, slot_hint):
+        return False
+
+    target_table = schema.canonical_table_name(slot_hint.get("target_table"))
+    measure_table = schema.canonical_table_name(slot_hint.get("measure_table"))
+    if not target_table or not measure_table:
+        return False
+
+    if target_table == measure_table:
+        return False
+
+    return schema.has_direct_fk_path(target_table, measure_table)
 
 
 def is_single_hop_join_superlative(slot_hint, schema):
@@ -928,7 +1018,10 @@ def choose_template(question, slot_hint, schema, mode="v1"):
     if get_superlative_exclusion_reason(q, mode=mode):
         return "FALLBACK"
 
-    if is_count_superlative(q):
+    if is_join_group_count_superlative(question, slot_hint, schema):
+        return "JOIN_GROUP_COUNT_TOP1"
+
+    if is_group_count_superlative(q, slot_hint):
         return "GROUP_COUNT_TOP1"
 
     if is_single_hop_join_superlative(slot_hint, schema):
@@ -947,6 +1040,8 @@ def build_sql(template, slot):
         return build_sql_nested(slot)
     if template == "GROUP_COUNT_TOP1":
         return build_sql_group_count(slot)
+    if template == "JOIN_GROUP_COUNT_TOP1":
+        return build_sql_join_group_count(slot)
     if template == "JOIN_ORDER_BY":
         return build_sql_join_order(slot)
     return ""
@@ -1011,6 +1106,28 @@ def build_sql_group_count(slot):
     return sql
 
 
+def build_sql_join_group_count(slot):
+    entity_table = _clean_optional_text(slot.get("entity_table"))
+    fact_table = _clean_optional_text(slot.get("fact_table"))
+    target = _clean_optional_text(slot.get("target"))
+    join_on = _clean_optional_text(slot.get("join_on"))
+    group_key = _clean_optional_text(slot.get("group_key"))
+    order = _clean_optional_text(slot.get("order")) or "DESC"
+    condition = _normalize_condition(slot.get("condition"))
+
+    if not entity_table or not fact_table or not target or not join_on or not group_key:
+        return ""
+
+    sql = (
+        f"SELECT {target} FROM {entity_table} "
+        f"JOIN {fact_table} ON {join_on}"
+    )
+    if condition:
+        sql += f" WHERE {condition}"
+    sql += f" GROUP BY {group_key} ORDER BY COUNT(*) {order} LIMIT 1"
+    return sql
+
+
 def build_sql_join_order(slot):
     left_table = _clean_optional_text(slot.get("left_table"))
     right_table = _clean_optional_text(slot.get("right_table"))
@@ -1044,6 +1161,50 @@ def _validate_projection(expr, alias_map, default_table, schema):
             continue
         if not schema.column_exists(table_name, column_name):
             return False
+    return True
+
+
+def _collect_projection_tables(expr, alias_map, default_table, schema):
+    projection_tables = set()
+    projection_parts = _split_csv(expr)
+    if not projection_parts:
+        return projection_tables
+
+    for part in projection_parts:
+        table_name, column_name = schema.resolve_identifier(part, alias_map, default_table)
+        if table_name is None and column_name is None:
+            continue
+        if schema.column_exists(table_name, column_name):
+            projection_tables.add(table_name)
+    return projection_tables
+
+
+def _validate_join_predicate(expr, alias_map, schema, required_tables=None):
+    join_expr = _clean_optional_text(expr)
+    if not join_expr:
+        return False
+
+    if re.search(r"\bOR\b", join_expr, flags=re.I):
+        return False
+
+    if "=" not in join_expr:
+        return False
+
+    qualified_refs = _extract_qualified_identifiers(join_expr)
+    if len(qualified_refs) < 2:
+        return False
+
+    referenced_tables = set()
+    for table_or_alias, column_name in qualified_refs:
+        base_table = alias_map.get(table_or_alias.lower(), table_or_alias)
+        table_name = schema.canonical_table_name(base_table)
+        if not schema.column_exists(table_name, column_name):
+            return False
+        referenced_tables.add(table_name)
+
+    if required_tables and not set(required_tables).issubset(referenced_tables):
+        return False
+
     return True
 
 
@@ -1090,7 +1251,64 @@ def validate_group_count(slot, schema):
         alias_map,
         default_table,
     )
-    return schema.column_exists(group_table, group_column)
+    if not schema.column_exists(group_table, group_column):
+        return False
+
+    projection_tables = _collect_projection_tables(slot.get("target", ""), alias_map, default_table, schema)
+    if not projection_tables:
+        return False
+
+    if any(table_name != group_table for table_name in projection_tables):
+        return False
+
+    if join_clause:
+        on_clauses = re.findall(r"\bON\b\s+(.+?)(?=\bJOIN\b|$)", join_clause, flags=re.I)
+        if not on_clauses:
+            return False
+        for on_clause in on_clauses:
+            if not _validate_join_predicate(on_clause, alias_map, schema):
+                return False
+
+    return True
+
+
+def validate_join_group_count(slot, schema):
+    entity_table = _clean_optional_text(slot.get("entity_table"))
+    fact_table = _clean_optional_text(slot.get("fact_table"))
+    if not schema.table_exists(entity_table) or not schema.table_exists(fact_table):
+        return False
+
+    entity_base = schema.canonical_table_name(entity_table)
+    fact_base = schema.canonical_table_name(fact_table)
+    if not entity_base or not fact_base or entity_base == fact_base:
+        return False
+
+    alias_map, default_table = schema.extract_alias_map([entity_table, fact_table])
+
+    if not _validate_projection(slot.get("target", ""), alias_map, default_table, schema):
+        return False
+
+    projection_tables = _collect_projection_tables(slot.get("target", ""), alias_map, default_table, schema)
+    if not projection_tables or any(table_name != entity_base for table_name in projection_tables):
+        return False
+
+    group_table, group_column = schema.resolve_identifier(
+        slot.get("group_key", ""),
+        alias_map,
+        default_table,
+    )
+    if not schema.column_exists(group_table, group_column):
+        return False
+
+    if group_table != entity_base:
+        return False
+
+    return _validate_join_predicate(
+        slot.get("join_on", ""),
+        alias_map,
+        schema,
+        required_tables={entity_base, fact_base},
+    )
 
 
 def validate_single_hop_join(slot, schema):
@@ -1111,7 +1329,18 @@ def validate_single_hop_join(slot, schema):
         alias_map,
         default_table,
     )
-    return schema.column_exists(measure_table, measure_column)
+    if not schema.column_exists(measure_table, measure_column):
+        return False
+
+    return _validate_join_predicate(
+        slot.get("join_on", ""),
+        alias_map,
+        schema,
+        required_tables={
+            schema.canonical_table_name(left_table),
+            schema.canonical_table_name(right_table),
+        },
+    )
 
 
 def validate_by_template(template, slot, schema):
@@ -1119,6 +1348,8 @@ def validate_by_template(template, slot, schema):
         return validate(slot, schema)
     if template == "GROUP_COUNT_TOP1":
         return validate_group_count(slot, schema)
+    if template == "JOIN_GROUP_COUNT_TOP1":
+        return validate_join_group_count(slot, schema)
     if template == "JOIN_ORDER_BY":
         return validate_single_hop_join(slot, schema)
     return False
