@@ -92,6 +92,19 @@ TOP1_CUES = [
     "most common",
 ]
 
+NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
 
 POS_RE = re.compile(
     r"\b(?:"
@@ -365,6 +378,36 @@ class SuperlativePatternSolver:
                 "reason": "group_agg_query",
             }
 
+        if is_multi_agg_extrema_query(question):
+            return {
+                "matched": False,
+                "reason": "multi_agg_extrema_query",
+            }
+
+        if is_topk_superlative_query(question):
+            return {
+                "matched": False,
+                "reason": "topk_superlative_query",
+            }
+
+        if is_count_superlative_with_count_output(question):
+            return {
+                "matched": False,
+                "reason": "count_superlative_with_count_output",
+            }
+
+        if is_temporal_superlative_query(question):
+            return {
+                "matched": False,
+                "reason": "temporal_superlative_query",
+            }
+
+        if is_ambiguous_popularity_query(question):
+            return {
+                "matched": False,
+                "reason": "ambiguous_popularity_query",
+            }
+
         schema = SQLiteSchemaGraph(self.sandbox.db_path)
         slot_hint = self._extract_slot_hint(schema_info, question)
         template = choose_template(question, slot_hint, schema)
@@ -581,6 +624,67 @@ def is_group_agg_query(question):
     )
 
 
+def is_multi_agg_extrema_query(question):
+    q = question.lower()
+    dual_extrema_pairs = [
+        "maximum and minimum",
+        "minimum and maximum",
+        "max and min",
+        "min and max",
+    ]
+    avg_extrema_pairs = [
+        "average, minimum, and maximum",
+        "average and maximum",
+        "average and minimum",
+    ]
+    return any(cue in q for cue in dual_extrema_pairs + avg_extrema_pairs)
+
+
+def is_topk_superlative_query(question):
+    q = question.lower()
+
+    if re.search(r"\btop\s+([2-9]|10)\b", q):
+        return True
+
+    if re.search(r"\b(top)\s+(two|three|four|five|six|seven|eight|nine|ten)\b", q):
+        return True
+
+    ranked_patterns = [
+        r"\b([2-9]|10)\s+(youngest|oldest|earliest|latest|largest|smallest|highest|lowest|most|fewest)\b",
+        r"\b(two|three|four|five|six|seven|eight|nine|ten)\s+(youngest|oldest|earliest|latest|largest|smallest|highest|lowest|most|fewest)\b",
+    ]
+    return any(re.search(pattern, q) for pattern in ranked_patterns)
+
+
+def is_count_superlative_with_count_output(question):
+    q = question.lower()
+    if not is_count_superlative(q):
+        return False
+
+    count_output_cues = [
+        "and how many",
+        "and number of",
+        "and the number of",
+        "and the numbers of",
+        "how many channels use it",
+        "how many does it have",
+        "how many does they have",
+        "number of tv channel it has",
+        "number of tv channels it has",
+    ]
+    return any(cue in q for cue in count_output_cues)
+
+
+def is_temporal_superlative_query(question):
+    q = question.lower()
+    return any(token in q for token in ["earliest", "latest"])
+
+
+def is_ambiguous_popularity_query(question):
+    q = question.lower()
+    return "most popular" in q or "popular" in q
+
+
 def is_count_superlative(question):
     q = question.lower()
     return is_superlative(q) and any(cue in q for cue in COUNT_CUES)
@@ -611,6 +715,21 @@ def choose_template(question, slot_hint, schema):
         return "FALLBACK"
 
     if is_group_agg_query(q):
+        return "FALLBACK"
+
+    if is_multi_agg_extrema_query(q):
+        return "FALLBACK"
+
+    if is_topk_superlative_query(q):
+        return "FALLBACK"
+
+    if is_count_superlative_with_count_output(q):
+        return "FALLBACK"
+
+    if is_temporal_superlative_query(q):
+        return "FALLBACK"
+
+    if is_ambiguous_popularity_query(q):
         return "FALLBACK"
 
     if is_count_superlative(q):
