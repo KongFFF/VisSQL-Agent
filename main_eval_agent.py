@@ -64,6 +64,12 @@ def parse_args():
     parser.add_argument("--max-retries", type=int, default=3, help="Agent 最大重试轮数")
     parser.add_argument("--retry-on-empty-result", action="store_true", help="是否在空结果时触发额外的 Reflexion / probe")
     parser.add_argument(
+        "--superlative-mode",
+        choices=["v1", "v2"],
+        default="v1",
+        help="superlative mode: v1=original, v2=conservative_fix",
+    )
+    parser.add_argument(
         "--schema-mode",
         choices=["full", "rag", "auto"],
         default="full",
@@ -143,7 +149,8 @@ def run_evaluation():
         lora_path=args.lora_path,
         db_path=str(first_db_path),
         max_retries=args.max_retries,
-        retry_on_empty_result=args.retry_on_empty_result
+        retry_on_empty_result=args.retry_on_empty_result,
+        superlative_mode=args.superlative_mode
     )
 
     predict_mode = "a" if args.resume and predict_path.exists() else "w"
@@ -237,6 +244,7 @@ def run_evaluation():
                     "final_failure_type": "RuntimeError",
                     "runtime_error": runtime_error,
                     "db_path": str(db_path),
+                    "superlative_mode": args.superlative_mode,
                     "schema_mode_requested": retrieval_info["requested_mode"],
                     "schema_mode_applied": retrieval_info["applied_mode"],
                     "schema_fallback_reason": retrieval_info["fallback_reason"],
@@ -280,6 +288,7 @@ def run_evaluation():
                     "probe_scenarios": probe_scenarios,
                     "final_failure_type": final_failure_type,
                     "db_path": agent_result.get("db_path", str(db_path)),
+                    "superlative_mode": args.superlative_mode,
                     "schema_mode_requested": retrieval_info["requested_mode"],
                     "schema_mode_applied": retrieval_info["applied_mode"],
                     "schema_fallback_reason": retrieval_info["fallback_reason"],

@@ -12,7 +12,8 @@ class VisSQLAgent:
         lora_path: str,
         db_path: str,
         max_retries: int = 3,
-        retry_on_empty_result: bool = False
+        retry_on_empty_result: bool = False,
+        superlative_mode: str = "v1",
     ):
         """
         初始化 Agent 大堂经理，统筹主厨(Coder)与试吃员(Sandbox)。
@@ -30,11 +31,13 @@ class VisSQLAgent:
             coder=self.coder,
             sandbox=self.sandbox,
             retry_on_empty_result=retry_on_empty_result,
+            mode=superlative_mode,
         )
         
         # 3. 设定最大反思重试次数 (防止陷入死循环)
         self.max_retries = max_retries
         self.retry_on_empty_result = retry_on_empty_result
+        self.superlative_mode = superlative_mode
         print("✅ 系统初始化完成，随时准备接收查询！\n")
 
     def run_query(self, schema_info: str, user_question: str, db_path: str = None, verbose: bool = True):

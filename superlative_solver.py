@@ -354,10 +354,11 @@ class SuperlativePatternSolver:
         "Return only valid JSON with no explanation."
     )
 
-    def __init__(self, coder, sandbox, retry_on_empty_result=False):
+    def __init__(self, coder, sandbox, retry_on_empty_result=False, mode="v1"):
         self.coder = coder
         self.sandbox = sandbox
         self.retry_on_empty_result = retry_on_empty_result
+        self.mode = (mode or "v1").lower()
 
     def try_solve(self, schema_info, question):
         if not is_superlative(question):
@@ -378,39 +379,40 @@ class SuperlativePatternSolver:
                 "reason": "group_agg_query",
             }
 
-        if is_multi_agg_extrema_query(question):
-            return {
-                "matched": False,
-                "reason": "multi_agg_extrema_query",
-            }
+        if self.mode == "v2":
+            if is_multi_agg_extrema_query(question):
+                return {
+                    "matched": False,
+                    "reason": "multi_agg_extrema_query",
+                }
 
-        if is_topk_superlative_query(question):
-            return {
-                "matched": False,
-                "reason": "topk_superlative_query",
-            }
+            if is_topk_superlative_query(question):
+                return {
+                    "matched": False,
+                    "reason": "topk_superlative_query",
+                }
 
-        if is_count_superlative_with_count_output(question):
-            return {
-                "matched": False,
-                "reason": "count_superlative_with_count_output",
-            }
+            if is_count_superlative_with_count_output(question):
+                return {
+                    "matched": False,
+                    "reason": "count_superlative_with_count_output",
+                }
 
-        if is_temporal_superlative_query(question):
-            return {
-                "matched": False,
-                "reason": "temporal_superlative_query",
-            }
+            if is_temporal_superlative_query(question):
+                return {
+                    "matched": False,
+                    "reason": "temporal_superlative_query",
+                }
 
-        if is_ambiguous_popularity_query(question):
-            return {
-                "matched": False,
-                "reason": "ambiguous_popularity_query",
-            }
+            if is_ambiguous_popularity_query(question):
+                return {
+                    "matched": False,
+                    "reason": "ambiguous_popularity_query",
+                }
 
         schema = SQLiteSchemaGraph(self.sandbox.db_path)
         slot_hint = self._extract_slot_hint(schema_info, question)
-        template = choose_template(question, slot_hint, schema)
+        template = choose_template(question, slot_hint, schema, mode=self.mode)
 
         if template == "FALLBACK":
             return {
@@ -708,7 +710,7 @@ def is_single_hop_join_superlative(slot_hint, schema):
     return schema.has_exactly_one_fk_path(target_table, measure_table, max_hops=1)
 
 
-def choose_template(question, slot_hint, schema):
+def choose_template(question, slot_hint, schema, mode="v1"):
     q = question.lower()
 
     if is_plain_extrema_value_query(q):
@@ -717,20 +719,21 @@ def choose_template(question, slot_hint, schema):
     if is_group_agg_query(q):
         return "FALLBACK"
 
-    if is_multi_agg_extrema_query(q):
-        return "FALLBACK"
+    if mode == "v2":
+        if is_multi_agg_extrema_query(q):
+            return "FALLBACK"
 
-    if is_topk_superlative_query(q):
-        return "FALLBACK"
+        if is_topk_superlative_query(q):
+            return "FALLBACK"
 
-    if is_count_superlative_with_count_output(q):
-        return "FALLBACK"
+        if is_count_superlative_with_count_output(q):
+            return "FALLBACK"
 
-    if is_temporal_superlative_query(q):
-        return "FALLBACK"
+        if is_temporal_superlative_query(q):
+            return "FALLBACK"
 
-    if is_ambiguous_popularity_query(q):
-        return "FALLBACK"
+        if is_ambiguous_popularity_query(q):
+            return "FALLBACK"
 
     if is_count_superlative(q):
         return "GROUP_COUNT_TOP1"
