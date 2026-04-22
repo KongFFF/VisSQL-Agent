@@ -44,42 +44,44 @@ class CoderNode:
         # 如果模型很乖没有加代码块，直接返回清理两端空格的原文
         return text.strip()
 
+    def generate_response(
+        self,
+        memory_messages: list,
+        system_prompt: str | None = None,
+        max_new_tokens: int = 512,
+    ) -> str:
+        """
+        通用推理入口：允许外部传入不同的 system prompt，以便输出 SQL 或 JSON。
+        """
+        full_messages = [{"role": "system", "content": system_prompt or self.system_prompt}] + memory_messages
+
+        text = self.tokenizer.apply_chat_template(
+            full_messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                **model_inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                eos_token_id=self.tokenizer.eos_token_id
+            )
+
+        generated_ids = [
+            output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+        ]
+        return self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
     def generate(self, memory_messages: list) -> str:
         """
         核心推理节点：接受结构化记忆，返回思考后的 SQL。
         :param memory_messages: 纯净的 JSON 对话列表，例如 [{"role": "user", "content": "..."}]
         """
-        # 1. 注入系统级护栏 (System Prompt)
-        # 我们在每次对话的最开头，强行塞入 System 设定
-        full_messages = [{"role": "system", "content": self.system_prompt}] + memory_messages
-
-        # 2. 核心魔法：使用 apply_chat_template 自动组装 ChatML 格式！
-        # 底层框架会根据 Qwen 的专属格式，全自动帮你加上 <|im_start|> 等特殊 Token。
-        text = self.tokenizer.apply_chat_template(
-            full_messages,
-            tokenize=False,
-            add_generation_prompt=True # 告诉模型：现在轮到 assistant 说话了
-        )
-        
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-
-        # 3. 生成配置 (彻底抹杀随机性)
-        # 因为我们写的是严谨的 SQL Agent，不是写诗，所以关掉 temperature (等效于 do_sample=False)
-        with torch.no_grad():
-            generated_ids = self.model.generate(
-                **model_inputs,
-                max_new_tokens=512,
-                do_sample=False,
-                eos_token_id=self.tokenizer.eos_token_id
-            )
-
-        # 4. 截取并解码大模型最新生成的回复
-        generated_ids = [
-            output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-        ]
-        raw_response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-        # 5. 清洗并返回纯净的 SQL
+        raw_response = self.generate_response(memory_messages, max_new_tokens=512)
         clean_sql = self._extract_sql(raw_response)
         return clean_sql
 

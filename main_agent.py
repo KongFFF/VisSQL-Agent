@@ -3,6 +3,7 @@ import time
 from agent_coder import CoderNode
 from agent_executor import SQLSandbox
 from agent_memory import WorkingMemory
+from superlative_solver import SuperlativePatternSolver
 
 class VisSQLAgent:
     def __init__(
@@ -25,6 +26,11 @@ class VisSQLAgent:
         
         # 2. 搭建试吃沙盒 (连接数据库)
         self.sandbox = SQLSandbox(db_path=db_path)
+        self.superlative_solver = SuperlativePatternSolver(
+            coder=self.coder,
+            sandbox=self.sandbox,
+            retry_on_empty_result=retry_on_empty_result,
+        )
         
         # 3. 设定最大反思重试次数 (防止陷入死循环)
         self.max_retries = max_retries
@@ -43,6 +49,50 @@ class VisSQLAgent:
             self.sandbox.set_db_path(db_path)
 
         log(f"👤 用户提问: {user_question}")
+
+        pattern_result = self.superlative_solver.try_solve(
+            schema_info=schema_info,
+            question=user_question,
+        )
+        if pattern_result.get("applied"):
+            execution = pattern_result["execution"]
+            log(
+                f"🧩 命中 Superlative 模板 {pattern_result['template']}，"
+                f"直接生成 SQL:\n{pattern_result['generated_sql']}"
+            )
+            return {
+                "final_sql": pattern_result["generated_sql"],
+                "is_success": True,
+                "attempts": 1,
+                "data": execution,
+                "memory_messages": [],
+                "attempt_records": [
+                    {
+                        "attempt": 1,
+                        "mode": "pattern",
+                        "template": pattern_result["template"],
+                        "generated_sql": pattern_result["generated_sql"],
+                        "execution_result": execution,
+                        "slot_hint": pattern_result.get("slot_hint"),
+                        "slot": pattern_result.get("slot"),
+                    }
+                ],
+                "probe_logs": [],
+                "had_probe": False,
+                "db_path": self.sandbox.db_path,
+                "route": "superlative_pattern",
+                "pattern_result": pattern_result,
+            }
+        elif pattern_result.get("matched"):
+            log(
+                f"🧩 Superlative 模板尝试未通过，原因: {pattern_result.get('reason')}。"
+                " 自动回退到通用 LLM Agent。"
+            )
+        elif pattern_result.get("reason") not in {"not_superlative", None}:
+            log(
+                f"🧩 Superlative 检测命中但不适合模板化，原因: {pattern_result.get('reason')}。"
+                " 继续使用通用 LLM Agent。"
+            )
         
         # 1. 初始化当前任务的“记事本”
         memory = WorkingMemory()
