@@ -14,6 +14,8 @@ class VisSQLAgent:
         max_retries: int = 3,
         retry_on_empty_result: bool = False,
         superlative_mode: str = "v1",
+        superlative_router_use_threshold: float = 0.70,
+        superlative_router_template_threshold: float = 0.65,
     ):
         """
         初始化 Agent 大堂经理，统筹主厨(Coder)与试吃员(Sandbox)。
@@ -32,12 +34,16 @@ class VisSQLAgent:
             sandbox=self.sandbox,
             retry_on_empty_result=retry_on_empty_result,
             mode=superlative_mode,
+            router_use_template_threshold=superlative_router_use_threshold,
+            router_template_threshold=superlative_router_template_threshold,
         )
         
         # 3. 设定最大反思重试次数 (防止陷入死循环)
         self.max_retries = max_retries
         self.retry_on_empty_result = retry_on_empty_result
         self.superlative_mode = superlative_mode
+        self.superlative_router_use_threshold = superlative_router_use_threshold
+        self.superlative_router_template_threshold = superlative_router_template_threshold
         print("✅ 系统初始化完成，随时准备接收查询！\n")
 
     def run_query(self, schema_info: str, user_question: str, db_path: str = None, verbose: bool = True):
@@ -78,6 +84,8 @@ class VisSQLAgent:
                         "execution_result": execution,
                         "slot_hint": pattern_result.get("slot_hint"),
                         "slot": pattern_result.get("slot"),
+                        "candidate_templates": pattern_result.get("candidate_templates"),
+                        "router_decision": pattern_result.get("router_decision"),
                     }
                 ],
                 "probe_logs": [],
@@ -142,7 +150,9 @@ class VisSQLAgent:
                         "attempt_records": attempt_records,
                         "probe_logs": probe_logs,
                         "had_probe": bool(probe_logs),
-                        "db_path": self.sandbox.db_path
+                        "db_path": self.sandbox.db_path,
+                        "route": "generic_llm",
+                        "pattern_result": pattern_result
                     }
 
                 if attempt < self.max_retries:
@@ -178,7 +188,9 @@ class VisSQLAgent:
                         "attempt_records": attempt_records,
                         "probe_logs": probe_logs,
                         "had_probe": bool(probe_logs),
-                        "db_path": self.sandbox.db_path
+                        "db_path": self.sandbox.db_path,
+                        "route": "generic_llm",
+                        "pattern_result": pattern_result
                     }
                 
             elif result["status"] == "error":
@@ -201,7 +213,9 @@ class VisSQLAgent:
                         "attempt_records": attempt_records,
                         "probe_logs": probe_logs,
                         "had_probe": bool(probe_logs),
-                        "db_path": self.sandbox.db_path
+                        "db_path": self.sandbox.db_path,
+                        "route": "generic_llm",
+                        "pattern_result": pattern_result
                     }
 
             attempt_records.append(attempt_record)

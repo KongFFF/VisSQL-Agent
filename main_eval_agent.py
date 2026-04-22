@@ -65,9 +65,21 @@ def parse_args():
     parser.add_argument("--retry-on-empty-result", action="store_true", help="是否在空结果时触发额外的 Reflexion / probe")
     parser.add_argument(
         "--superlative-mode",
-        choices=["v1", "v2"],
+        choices=["v1", "v2", "phase0", "phase1"],
         default="v1",
-        help="superlative mode: v1=original, v2=conservative_fix",
+        help="superlative mode: v1=original, phase0=current 4-template + exclusion layer, v2=alias of phase0, phase1=non-trained router",
+    )
+    parser.add_argument(
+        "--superlative-router-use-threshold",
+        type=float,
+        default=0.70,
+        help="minimum p(use_template) for phase1 router to allow template takeover",
+    )
+    parser.add_argument(
+        "--superlative-router-template-threshold",
+        type=float,
+        default=0.65,
+        help="minimum selected template confidence for phase1 router to allow template takeover",
     )
     parser.add_argument(
         "--schema-mode",
@@ -150,7 +162,9 @@ def run_evaluation():
         db_path=str(first_db_path),
         max_retries=args.max_retries,
         retry_on_empty_result=args.retry_on_empty_result,
-        superlative_mode=args.superlative_mode
+        superlative_mode=args.superlative_mode,
+        superlative_router_use_threshold=args.superlative_router_use_threshold,
+        superlative_router_template_threshold=args.superlative_router_template_threshold
     )
 
     predict_mode = "a" if args.resume and predict_path.exists() else "w"
@@ -306,6 +320,13 @@ def run_evaluation():
                     "schema_path_hint_join_paths": retrieval_info["path_hint_join_paths"],
                     "schema_path_hint_primary_join_path": retrieval_info["path_hint_primary_join_path"],
                 }
+                summary_record["route"] = agent_result.get("route", "generic_llm")
+                if agent_result.get("pattern_result"):
+                    pattern_result = agent_result["pattern_result"]
+                    summary_record["pattern_reason"] = pattern_result.get("reason")
+                    summary_record["pattern_template"] = pattern_result.get("template")
+                    summary_record["pattern_candidate_templates"] = pattern_result.get("candidate_templates")
+                    summary_record["pattern_router_decision"] = make_jsonable(pattern_result.get("router_decision"))
 
                 if "data" in agent_result:
                     summary_record["final_row_count"] = agent_result["data"].get("row_count")

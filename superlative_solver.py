@@ -105,6 +105,20 @@ NUMBER_WORDS = {
     "ten": 10,
 }
 
+TEMPLATE_ORDER = [
+    "ORDER_BY",
+    "NESTED",
+    "GROUP_COUNT_TOP1",
+    "JOIN_ORDER_BY",
+]
+
+TEMPLATE_DESCRIPTIONS = {
+    "ORDER_BY": "Single-table top-1 object retrieval via ORDER BY ... LIMIT 1.",
+    "NESTED": "Single-table extrema object retrieval via nested MIN/MAX comparison.",
+    "GROUP_COUNT_TOP1": "Top-1 group by count via GROUP BY ... ORDER BY COUNT(*) ... LIMIT 1.",
+    "JOIN_ORDER_BY": "Single-hop join object retrieval where target and measure are on different tables.",
+}
+
 
 POS_RE = re.compile(
     r"\b(?:"
@@ -132,6 +146,17 @@ def _coerce_bool(value):
     if isinstance(value, str):
         return value.strip().lower() in {"true", "1", "yes"}
     return bool(value)
+
+
+def _coerce_float(value, default=0.0):
+    try:
+        if value is None or value == "":
+            return float(default)
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        return float(value)
+    except Exception:
+        return float(default)
 
 
 def _split_csv(expr):
@@ -349,16 +374,32 @@ class SuperlativePatternSolver:
         "Return only valid JSON with no explanation."
     )
 
+    TEMPLATE_ROUTER_SYSTEM_PROMPT = (
+        "You are a conservative router for SQL templates. "
+        "You must decide whether a question should use a template route or fall back to the baseline SQL generator. "
+        "Prefer precision over recall. Return only valid JSON with no explanation."
+    )
+
     SLOT_SYSTEM_PROMPT = (
         "You extract SQL template slots from a question and schema. "
         "Return only valid JSON with no explanation."
     )
 
-    def __init__(self, coder, sandbox, retry_on_empty_result=False, mode="v1"):
+    def __init__(
+        self,
+        coder,
+        sandbox,
+        retry_on_empty_result=False,
+        mode="v1",
+        router_use_template_threshold=0.70,
+        router_template_threshold=0.65,
+    ):
         self.coder = coder
         self.sandbox = sandbox
         self.retry_on_empty_result = retry_on_empty_result
         self.mode = (mode or "v1").lower()
+        self.router_use_template_threshold = router_use_template_threshold
+        self.router_template_threshold = router_template_threshold
 
     def try_solve(self, schema_info, question):
         if not is_superlative(question):
@@ -379,46 +420,54 @@ class SuperlativePatternSolver:
                 "reason": "group_agg_query",
             }
 
-        if self.mode == "v2":
-            if is_multi_agg_extrema_query(question):
-                return {
-                    "matched": False,
-                    "reason": "multi_agg_extrema_query",
-                }
-
-            if is_topk_superlative_query(question):
-                return {
-                    "matched": False,
-                    "reason": "topk_superlative_query",
-                }
-
-            if is_count_superlative_with_count_output(question):
-                return {
-                    "matched": False,
-                    "reason": "count_superlative_with_count_output",
-                }
-
-            if is_temporal_superlative_query(question):
-                return {
-                    "matched": False,
-                    "reason": "temporal_superlative_query",
-                }
-
-            if is_ambiguous_popularity_query(question):
-                return {
-                    "matched": False,
-                    "reason": "ambiguous_popularity_query",
-                }
+        exclusion_reason = get_superlative_exclusion_reason(question, mode=self.mode)
+        if exclusion_reason:
+            return {
+                "matched": False,
+                "reason": exclusion_reason,
+            }
 
         schema = SQLiteSchemaGraph(self.sandbox.db_path)
         slot_hint = self._extract_slot_hint(schema_info, question)
-        template = choose_template(question, slot_hint, schema, mode=self.mode)
+        router_decision = None
+        candidate_templates = []
+
+        if uses_phase1_router(self.mode):
+            candidate_templates = get_candidate_templates(question, slot_hint, schema)
+            if not candidate_templates:
+                return {
+                    "matched": False,
+                    "reason": "no_phase1_candidates",
+                    "slot_hint": slot_hint,
+                }
+
+            router_decision = self._route_templates(
+                schema_info=schema_info,
+                question=question,
+                slot_hint=slot_hint,
+                candidate_templates=candidate_templates,
+                schema=schema,
+            )
+            if not self._router_accepts(router_decision):
+                return {
+                    "matched": False,
+                    "reason": "low_router_confidence",
+                    "slot_hint": slot_hint,
+                    "candidate_templates": candidate_templates,
+                    "router_decision": router_decision,
+                }
+
+            template = router_decision["selected_template"]
+        else:
+            template = choose_template(question, slot_hint, schema, mode=self.mode)
 
         if template == "FALLBACK":
             return {
                 "matched": False,
                 "reason": "template_fallback",
                 "slot_hint": slot_hint,
+                "candidate_templates": candidate_templates,
+                "router_decision": router_decision,
             }
 
         slot = self._extract_slots(schema_info, question, template)
@@ -429,6 +478,8 @@ class SuperlativePatternSolver:
                 "reason": "slot_extraction_failed",
                 "template": template,
                 "slot_hint": slot_hint,
+                "candidate_templates": candidate_templates,
+                "router_decision": router_decision,
             }
 
         sql = build_sql(template, slot)
@@ -440,6 +491,8 @@ class SuperlativePatternSolver:
                 "template": template,
                 "slot_hint": slot_hint,
                 "slot": slot,
+                "candidate_templates": candidate_templates,
+                "router_decision": router_decision,
             }
 
         if not validate_by_template(template, slot, schema):
@@ -451,6 +504,8 @@ class SuperlativePatternSolver:
                 "slot_hint": slot_hint,
                 "slot": slot,
                 "generated_sql": sql,
+                "candidate_templates": candidate_templates,
+                "router_decision": router_decision,
             }
 
         execution = self.sandbox.execute_query(sql)
@@ -464,6 +519,8 @@ class SuperlativePatternSolver:
                 "slot": slot,
                 "generated_sql": sql,
                 "execution": execution,
+                "candidate_templates": candidate_templates,
+                "router_decision": router_decision,
             }
 
         if self.retry_on_empty_result and execution.get("row_count", 0) == 0:
@@ -476,6 +533,8 @@ class SuperlativePatternSolver:
                 "slot": slot,
                 "generated_sql": sql,
                 "execution": execution,
+                "candidate_templates": candidate_templates,
+                "router_decision": router_decision,
             }
 
         return {
@@ -487,6 +546,8 @@ class SuperlativePatternSolver:
             "slot": slot,
             "generated_sql": sql,
             "execution": execution,
+            "candidate_templates": candidate_templates,
+            "router_decision": router_decision,
         }
 
     def _extract_slot_hint(self, schema_info, question):
@@ -540,6 +601,97 @@ Rules:
         if "join_clause" in slot:
             slot["join_clause"] = _normalize_join_clause(slot["join_clause"])
         return slot
+
+    def _route_templates(self, schema_info, question, slot_hint, candidate_templates, schema):
+        candidate_lines = "\n".join(
+            f'- {name}: {TEMPLATE_DESCRIPTIONS[name]}'
+            for name in candidate_templates
+        )
+        all_template_scores = ",\n    ".join(f'"{name}": 0.0' for name in TEMPLATE_ORDER)
+        signal_lines = [
+            f"- is_count_superlative: {str(is_count_superlative(question)).lower()}",
+            f"- is_single_hop_join_superlative: {str(is_single_hop_join_superlative(slot_hint, schema)).lower()}",
+            f"- looks_like_nested_extrema: {str(any(token in question.lower() for token in ['minimum', 'smallest'])).lower()}",
+            f"- target_table: {slot_hint.get('target_table', '')}",
+            f"- measure_table: {slot_hint.get('measure_table', '')}",
+            f"- needs_group_by: {str(slot_hint.get('needs_group_by', False)).lower()}",
+            f"- needs_nested: {str(slot_hint.get('needs_nested', False)).lower()}",
+        ]
+        prompt = f"""Schema:
+{schema_info}
+
+Question:
+{question}
+
+Candidate templates:
+{candidate_lines}
+
+Structural signals:
+{chr(10).join(signal_lines)}
+
+Return JSON with this format:
+{{
+  "use_template_score": 0.0,
+  "selected_template": "ORDER_BY | NESTED | GROUP_COUNT_TOP1 | JOIN_ORDER_BY | FALLBACK",
+  "template_scores": {{
+    {all_template_scores}
+  }},
+  "reason": ""
+}}
+
+Rules:
+- Scores must be floats between 0 and 1.
+- selected_template must be one of the candidate templates or FALLBACK.
+- Prefer precision over recall.
+- If uncertain, return low scores and choose FALLBACK.
+- Base your decision on structural fit, not just lexical overlap.
+- Output JSON only.
+"""
+        raw = self.coder.generate_response(
+            [{"role": "user", "content": prompt}],
+            system_prompt=self.TEMPLATE_ROUTER_SYSTEM_PROMPT,
+            max_new_tokens=260,
+        )
+        data = _parse_json_like(raw) or {}
+        template_scores = data.get("template_scores", {}) if isinstance(data.get("template_scores"), dict) else {}
+        normalized_scores = {
+            name: max(0.0, min(1.0, _coerce_float(template_scores.get(name), default=0.0)))
+            for name in TEMPLATE_ORDER
+        }
+        selected_template = _clean_optional_text(data.get("selected_template")).upper()
+        use_template_score = max(0.0, min(1.0, _coerce_float(data.get("use_template_score"), default=0.0)))
+        if selected_template not in candidate_templates:
+            best_candidate = max(candidate_templates, key=lambda name: normalized_scores.get(name, 0.0))
+            if normalized_scores.get(best_candidate, 0.0) > 0:
+                selected_template = best_candidate
+            else:
+                selected_template = "FALLBACK"
+        selected_template_score = (
+            normalized_scores.get(selected_template, 0.0)
+            if selected_template != "FALLBACK"
+            else 0.0
+        )
+        return {
+            "use_template_score": use_template_score,
+            "selected_template": selected_template,
+            "selected_template_score": selected_template_score,
+            "route_score": use_template_score * selected_template_score,
+            "template_scores": normalized_scores,
+            "candidate_templates": list(candidate_templates),
+            "reason": _clean_optional_text(data.get("reason")),
+            "raw_response": raw,
+        }
+
+    def _router_accepts(self, router_decision):
+        if not router_decision:
+            return False
+        if router_decision.get("selected_template") in {"", "FALLBACK"}:
+            return False
+        if router_decision.get("use_template_score", 0.0) < self.router_use_template_threshold:
+            return False
+        if router_decision.get("selected_template_score", 0.0) < self.router_template_threshold:
+            return False
+        return True
 
     def _slot_prompt(self, schema_info, question, template):
         if template == "ORDER_BY":
@@ -692,6 +844,60 @@ def is_count_superlative(question):
     return is_superlative(q) and any(cue in q for cue in COUNT_CUES)
 
 
+def uses_phase0_exclusion_layer(mode):
+    mode = (mode or "v1").lower()
+    return mode in {"phase0", "v2", "phase1"}
+
+
+def uses_phase1_router(mode):
+    mode = (mode or "").lower()
+    return mode == "phase1"
+
+
+def get_superlative_exclusion_reason(question, mode="v1"):
+    if not uses_phase0_exclusion_layer(mode):
+        return None
+
+    if is_multi_agg_extrema_query(question):
+        return "multi_agg_extrema_query"
+
+    if is_topk_superlative_query(question):
+        return "topk_superlative_query"
+
+    if is_count_superlative_with_count_output(question):
+        return "count_superlative_with_count_output"
+
+    if is_temporal_superlative_query(question):
+        return "temporal_superlative_query"
+
+    if is_ambiguous_popularity_query(question):
+        return "ambiguous_popularity_query"
+
+    return None
+
+
+def get_candidate_templates(question, slot_hint, schema):
+    q = question.lower()
+    candidates = []
+
+    if is_count_superlative(q):
+        candidates.append("GROUP_COUNT_TOP1")
+
+    if is_single_hop_join_superlative(slot_hint, schema):
+        candidates.append("JOIN_ORDER_BY")
+
+    if any(token in q for token in ["minimum", "smallest"]):
+        candidates.append("NESTED")
+
+    candidates.append("ORDER_BY")
+
+    deduped = []
+    for name in candidates:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped
+
+
 def is_single_hop_join_superlative(slot_hint, schema):
     target_table = slot_hint.get("target_table")
     measure_table = slot_hint.get("measure_table")
@@ -719,21 +925,8 @@ def choose_template(question, slot_hint, schema, mode="v1"):
     if is_group_agg_query(q):
         return "FALLBACK"
 
-    if mode == "v2":
-        if is_multi_agg_extrema_query(q):
-            return "FALLBACK"
-
-        if is_topk_superlative_query(q):
-            return "FALLBACK"
-
-        if is_count_superlative_with_count_output(q):
-            return "FALLBACK"
-
-        if is_temporal_superlative_query(q):
-            return "FALLBACK"
-
-        if is_ambiguous_popularity_query(q):
-            return "FALLBACK"
+    if get_superlative_exclusion_reason(q, mode=mode):
+        return "FALLBACK"
 
     if is_count_superlative(q):
         return "GROUP_COUNT_TOP1"
