@@ -150,6 +150,8 @@ NEG_RES = [re.compile(pattern, re.I) for pattern in NEGATIVE_PATTERNS]
 def _clean_optional_text(value):
     if value is None:
         return ""
+    if isinstance(value, list):
+        return ", ".join(_clean_optional_text(item) for item in value if _clean_optional_text(item))
     if isinstance(value, str):
         stripped = value.strip()
         if stripped.lower() in {"null", "none", "n/a"}:
@@ -227,6 +229,66 @@ def _contains_any_regex(text, patterns):
 
 def _extract_qualified_identifiers(expr):
     return re.findall(r"\b([A-Za-z_][\w]*)\.([A-Za-z_][\w]*)\b", _clean_optional_text(expr))
+
+
+def _clean_string_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [_clean_optional_text(item) for item in value if _clean_optional_text(item)]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = ast.literal_eval(text)
+                if isinstance(parsed, list):
+                    return [_clean_optional_text(item) for item in parsed if _clean_optional_text(item)]
+            except Exception:
+                pass
+        return [_clean_optional_text(part) for part in _split_csv(text) if _clean_optional_text(part)]
+    return [_clean_optional_text(value)]
+
+
+def _projection_count(expr):
+    return len(_split_csv(_clean_optional_text(expr)))
+
+
+def expected_projection_count(question):
+    q = question.lower()
+    prefix = q
+    stop_markers = [
+        " ordered by ",
+        " with the ",
+        " with most ",
+        " with least ",
+        " whose ",
+        " who ",
+        " that ",
+        " by the ",
+        " for the ",
+        " from the ",
+        " in the ",
+        " where ",
+    ]
+    for marker in stop_markers:
+        idx = prefix.find(marker)
+        if idx != -1:
+            prefix = prefix[:idx]
+            break
+
+    if re.search(r"\b(list|show|return|give|find)\s+both\b", q):
+        return 2
+
+    comma_count = prefix.count(",")
+    if comma_count:
+        return min(6, comma_count + 1)
+
+    if re.search(r"\b(name|names|id|ids|code|codes|year|date|capacity|country|district|surface area|release year|winner|loser|first name|last name|summary|line 1|line 2)\b.*\band\b.*\b(name|names|id|ids|code|codes|year|date|capacity|country|district|surface area|release year|winner|loser|first name|last name|summary|line 1|line 2)\b", prefix):
+        return 2
+
+    return 1
 
 
 def _parse_json_like(text):
@@ -406,6 +468,17 @@ class SQLiteSchemaGraph:
                 return True
         return False
 
+    def render_column_candidates(self):
+        lines = []
+        for table_key in sorted(self.tables):
+            table = self.tables[table_key]
+            columns = [
+                f"{table['name']}.{column_name}"
+                for column_name in table["columns"].values()
+            ]
+            lines.append(f"- {table['name']}: {', '.join(columns)}")
+        return "\n".join(lines)
+
 
 class SuperlativePatternSolver:
     ROUTE_SYSTEM_PROMPT = (
@@ -509,7 +582,7 @@ class SuperlativePatternSolver:
                 "router_decision": router_decision,
             }
 
-        slot = self._extract_slots(schema_info, question, template)
+        slot = self._extract_slots(schema_info, question, template, schema=schema)
         if not slot:
             return {
                 "matched": True,
@@ -520,6 +593,26 @@ class SuperlativePatternSolver:
                 "candidate_templates": candidate_templates,
                 "router_decision": router_decision,
             }
+
+        if uses_controlled_slot_filling(self.mode):
+            slot = self._ensure_projection_complete(
+                schema_info=schema_info,
+                question=question,
+                template=template,
+                slot=slot,
+                schema=schema,
+            )
+            if not slot or not projection_is_complete(question, slot):
+                return {
+                    "matched": True,
+                    "applied": False,
+                    "reason": "projection_incomplete",
+                    "template": template,
+                    "slot_hint": slot_hint,
+                    "slot": slot,
+                    "candidate_templates": candidate_templates,
+                    "router_decision": router_decision,
+                }
 
         sql = build_sql(template, slot)
         if not sql:
@@ -623,8 +716,8 @@ Rules:
             "needs_nested": _coerce_bool(data.get("needs_nested")),
         }
 
-    def _extract_slots(self, schema_info, question, template):
-        prompt = self._slot_prompt(schema_info, question, template)
+    def _extract_slots(self, schema_info, question, template, schema=None):
+        prompt = self._slot_prompt(schema_info, question, template, schema=schema)
         raw = self.coder.generate_response(
             [{"role": "user", "content": prompt}],
             system_prompt=self.SLOT_SYSTEM_PROMPT,
@@ -634,12 +727,67 @@ Rules:
         if not isinstance(data, dict):
             return None
 
-        slot = {key: _clean_optional_text(value) for key, value in data.items()}
+        slot = normalize_slot(data)
         if "condition" in slot:
             slot["condition"] = _normalize_condition(slot["condition"])
         if "join_clause" in slot:
             slot["join_clause"] = _normalize_join_clause(slot["join_clause"])
         return slot
+
+    def _ensure_projection_complete(self, schema_info, question, template, slot, schema):
+        if projection_is_complete(question, slot):
+            return slot
+
+        repaired_slot = dict(slot)
+        repaired_targets = self._repair_target_columns(
+            schema_info=schema_info,
+            question=question,
+            template=template,
+            slot=slot,
+            schema=schema,
+        )
+        if repaired_targets:
+            repaired_slot["target_columns"] = repaired_targets
+            repaired_slot["target"] = ", ".join(repaired_targets)
+        return repaired_slot
+
+    def _repair_target_columns(self, schema_info, question, template, slot, schema):
+        prompt = f"""Schema:
+{schema_info}
+
+Available column candidates:
+{schema.render_column_candidates()}
+
+Question:
+{question}
+
+Template:
+{template}
+
+Current slot:
+{json.dumps(slot, ensure_ascii=False)}
+
+The current target projection is incomplete. The question appears to require at least {expected_projection_count(question)} output column(s).
+
+Return JSON with this exact format:
+{{
+  "target_columns": []
+}}
+
+Rules:
+- Choose target_columns only from Available column candidates.
+- Include every column explicitly requested by the question.
+- Do not include the ranking/count/measure column unless the question asks to output it.
+- Do not output SQL.
+- Output JSON only.
+"""
+        raw = self.coder.generate_response(
+            [{"role": "user", "content": prompt}],
+            system_prompt=self.SLOT_SYSTEM_PROMPT,
+            max_new_tokens=220,
+        )
+        data = _parse_json_like(raw) or {}
+        return _clean_string_list(data.get("target_columns"))
 
     def _route_templates(self, schema_info, question, slot_hint, candidate_templates, schema):
         candidate_lines = "\n".join(
@@ -734,57 +882,77 @@ Rules:
             return False
         return True
 
-    def _slot_prompt(self, schema_info, question, template):
+    def _slot_prompt(self, schema_info, question, template, schema=None):
+        controlled = uses_controlled_slot_filling(self.mode)
+        target_columns_line = '  "target_columns": [],\n' if controlled else ""
         if template == "ORDER_BY":
-            slot_schema = """{
-  "target": "",
+            slot_schema = f"""{{
+{target_columns_line}  "target": "",
   "table": "",
   "measure": "",
   "order": "ASC or DESC",
   "condition": ""
-}"""
+}}"""
         elif template == "NESTED":
-            slot_schema = """{
-  "target": "",
+            slot_schema = f"""{{
+{target_columns_line}  "target": "",
   "table": "",
   "measure": "",
   "agg_func": "MIN or MAX",
   "condition": ""
-}"""
+}}"""
         elif template == "GROUP_COUNT_TOP1":
-            slot_schema = """{
-  "target": "",
+            slot_schema = f"""{{
+{target_columns_line}  "target": "",
   "table": "",
   "join_clause": "",
   "group_key": "",
   "order": "ASC or DESC",
   "condition": ""
-}"""
+}}"""
         elif template == "JOIN_GROUP_COUNT_TOP1":
-            slot_schema = """{
-  "target": "",
+            slot_schema = f"""{{
+{target_columns_line}  "target": "",
   "entity_table": "",
   "fact_table": "",
   "join_on": "",
   "group_key": "",
   "order": "ASC or DESC",
   "condition": ""
-}"""
+}}"""
         elif template == "JOIN_ORDER_BY":
-            slot_schema = """{
-  "target": "",
+            slot_schema = f"""{{
+{target_columns_line}  "target": "",
   "left_table": "",
   "right_table": "",
   "join_on": "",
   "measure": "",
   "order": "ASC or DESC",
   "condition": ""
-}"""
+}}"""
         else:
             raise ValueError(f"Unsupported template: {template}")
 
+        candidate_block = ""
+        if controlled and schema is not None:
+            candidate_block = f"""
+
+Available column candidates:
+{schema.render_column_candidates()}
+"""
+
+        controlled_rules = ""
+        if controlled:
+            controlled_rules = """
+- In phase1_c, fill target_columns first. It must be an array of fully qualified columns such as ["singer.song_name", "singer.song_release_year"].
+- Choose target_columns only from Available column candidates.
+- Include every column explicitly requested by the question; do not silently drop second or third requested output columns.
+- Also fill target as the comma-separated version of target_columns for backward compatibility.
+"""
+
         return f"""Schema:
 {schema_info}
+{candidate_block}
 
 Question:
 {question}
@@ -800,6 +968,7 @@ Rules:
 - Keep condition empty when no WHERE clause is needed.
 - For GROUP_COUNT_TOP1, use it only when target and group_key both come from the grouped source side. Use join_clause only when a join is needed for filtering or context.
 - For JOIN_GROUP_COUNT_TOP1, use it when the final target belongs to an entity table but the count happens on a related fact table. In this case target and group_key should come from entity_table.
+{controlled_rules}
 - Do not output SQL.
 - Output JSON only.
 """
@@ -892,6 +1061,36 @@ def is_ambiguous_popularity_query(question):
     return "most popular" in q or "popular" in q
 
 
+def is_ordered_list_superlative_query(question):
+    q = question.lower()
+    if not re.search(r"\border(?:ed)?\s+by\b", q):
+        return False
+
+    list_cues = [
+        "show ",
+        "list ",
+        "return ",
+        "for all",
+        " all ",
+        "from the oldest to the youngest",
+        "from oldest to youngest",
+        "from the youngest to the oldest",
+        "from youngest to oldest",
+        "from the largest to the smallest",
+        "from largest to smallest",
+        "from the highest to the lowest",
+        "from highest to lowest",
+    ]
+    return any(cue in q for cue in list_cues)
+
+
+def is_per_group_percentage_extrema_query(question):
+    q = question.lower()
+    group_signal = any(cue in q for cue in ["for each", "each country", "different countries", "different country"])
+    extrema_signal = any(cue in q for cue in ["greatest percentage", "highest percentage", "lowest percentage", "largest percentage", "smallest percentage"])
+    return group_signal and extrema_signal
+
+
 def is_count_superlative(question):
     q = question.lower()
     return is_superlative(q) and any(cue in q for cue in COUNT_CUES)
@@ -916,14 +1115,43 @@ def is_group_count_superlative(question, slot_hint=None):
     return False
 
 
+def normalize_slot(data):
+    slot = {}
+    for key, value in data.items():
+        if key == "target_columns":
+            slot[key] = _clean_string_list(value)
+        else:
+            slot[key] = _clean_optional_text(value)
+
+    if slot.get("target_columns"):
+        slot["target"] = ", ".join(slot["target_columns"])
+    elif isinstance(data.get("target"), list):
+        target_columns = _clean_string_list(data.get("target"))
+        slot["target_columns"] = target_columns
+        slot["target"] = ", ".join(target_columns)
+
+    return slot
+
+
+def projection_is_complete(question, slot):
+    expected_count = expected_projection_count(question)
+    actual_count = _projection_count(slot.get("target", ""))
+    return actual_count >= expected_count
+
+
 def uses_phase0_exclusion_layer(mode):
     mode = (mode or "v1").lower()
-    return mode in {"phase0", "v2", "phase1"}
+    return mode in {"phase0", "v2", "phase1", "phase1_c"}
 
 
 def uses_phase1_router(mode):
     mode = (mode or "").lower()
-    return mode == "phase1"
+    return mode in {"phase1", "phase1_c"}
+
+
+def uses_controlled_slot_filling(mode):
+    mode = (mode or "").lower()
+    return mode == "phase1_c"
 
 
 def get_superlative_exclusion_reason(question, mode="v1"):
@@ -944,6 +1172,12 @@ def get_superlative_exclusion_reason(question, mode="v1"):
 
     if is_ambiguous_popularity_query(question):
         return "ambiguous_popularity_query"
+
+    if uses_controlled_slot_filling(mode) and is_ordered_list_superlative_query(question):
+        return "ordered_list_superlative_query"
+
+    if uses_controlled_slot_filling(mode) and is_per_group_percentage_extrema_query(question):
+        return "per_group_percentage_extrema_query"
 
     return None
 

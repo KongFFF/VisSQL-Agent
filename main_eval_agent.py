@@ -65,9 +65,9 @@ def parse_args():
     parser.add_argument("--retry-on-empty-result", action="store_true", help="是否在空结果时触发额外的 Reflexion / probe")
     parser.add_argument(
         "--superlative-mode",
-        choices=["v1", "v2", "phase0", "phase1"],
+        choices=["v1", "v2", "phase0", "phase1", "phase1_c"],
         default="v1",
-        help="superlative mode: v1=original, phase0=current 4-template + exclusion layer, v2=alias of phase0, phase1=non-trained router",
+        help="superlative mode: v1=original, phase0=current template + exclusion layer, v2=alias of phase0, phase1=non-trained router, phase1_c=phase1 with controlled slot filling",
     )
     parser.add_argument(
         "--superlative-router-use-threshold",
