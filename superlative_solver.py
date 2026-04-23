@@ -130,6 +130,12 @@ TEMPLATE_ORDER = [
     "JOIN_ORDER_BY",
 ]
 
+COUNT_FAMILY_TEMPLATES = {
+    "GROUP_COUNT_TOP1",
+    "ENTITY_BY_RELATED_COUNT_TOP1",
+    "JOIN_GROUP_COUNT_TOP1",
+}
+
 TEMPLATE_DESCRIPTIONS = {
     "ORDER_BY": "Single-table top-1 object retrieval via ORDER BY ... LIMIT 1.",
     "NESTED": "Single-table extrema object retrieval via nested MIN/MAX comparison.",
@@ -251,6 +257,37 @@ def _clean_string_list(value):
                 pass
         return [_clean_optional_text(part) for part in _split_csv(text) if _clean_optional_text(part)]
     return [_clean_optional_text(value)]
+
+
+def _parse_table_expr(expr):
+    expr = _clean_optional_text(expr)
+    if not expr:
+        return None
+
+    match = re.match(
+        r"^\s*([A-Za-z_][\w]*)\s*(?:AS\s+([A-Za-z_][\w]*)|([A-Za-z_][\w]*))?\s*$",
+        expr,
+        flags=re.I,
+    )
+    if not match:
+        return None
+
+    base_table = match.group(1)
+    alias = match.group(2) or match.group(3) or base_table
+    return {
+        "base_table": base_table,
+        "alias": alias,
+    }
+
+
+def _extract_table_refs(table_exprs):
+    refs = {}
+    for expr in table_exprs:
+        parsed = _parse_table_expr(expr)
+        if not parsed:
+            continue
+        refs[parsed["base_table"].lower()] = parsed["alias"]
+    return refs
 
 
 def _projection_count(expr):
@@ -650,6 +687,15 @@ class SuperlativePatternSolver:
                 "router_decision": router_decision,
             }
 
+        if uses_structured_projection_selector(self.mode):
+            slot = self._select_count_family_projection(
+                schema_info=schema_info,
+                question=question,
+                template=template,
+                slot=slot,
+                schema=schema,
+            )
+
         if uses_controlled_slot_filling(self.mode):
             slot = self._ensure_projection_complete(
                 schema_info=schema_info,
@@ -894,6 +940,165 @@ Rules:
             "include_count": include_count,
         }
         return slot
+
+    def _select_count_family_projection(self, schema_info, question, template, slot, schema):
+        if template not in COUNT_FAMILY_TEMPLATES or schema is None:
+            return slot
+
+        candidate_info = self._count_projection_candidate_info(template, slot, schema)
+        if not candidate_info or not candidate_info.get("candidates"):
+            return slot
+
+        prompt = f"""Schema:
+{schema_info}
+
+Question:
+{question}
+
+Template:
+{template}
+
+Current slot:
+{json.dumps(slot, ensure_ascii=False)}
+
+Answer-side table:
+{candidate_info['answer_table']}
+
+Available projection candidates:
+{chr(10).join(f"- {col}" for col in candidate_info['candidates'])}
+
+Special aggregate candidate:
+- COUNT(*) (use only if the question explicitly asks to output the count/number itself)
+
+Return JSON with this exact format:
+{{
+  "target_columns": []
+}}
+
+Rules:
+- Choose target_columns only from Available projection candidates plus COUNT(*) when the question explicitly asks for the count/number itself.
+- Only revise the target projection. Do not change join tables, join conditions, group key, filters, or ordering.
+- Include every answer-side column explicitly requested by the question.
+- Preserve already-correct current target choices when possible; only add or replace columns when needed to make the projection complete and answer-side consistent.
+- Do not include fact-side, filter-side, or measure columns unless the question explicitly asks to output them.
+- The question appears to require at least {expected_projection_count(question)} output column(s).
+- Output JSON only.
+"""
+        raw = self.coder.generate_response(
+            [{"role": "user", "content": prompt}],
+            system_prompt=self.SLOT_SYSTEM_PROMPT,
+            max_new_tokens=220,
+        )
+        data = _parse_json_like(raw) or {}
+        selected = []
+        allowed = {candidate.lower(): candidate for candidate in candidate_info["candidates"]}
+        for value in _clean_string_list(data.get("target_columns")):
+            if value.upper() == "COUNT(*)":
+                selected.append("COUNT(*)")
+                continue
+            canonical = allowed.get(value.lower())
+            if canonical:
+                selected.append(canonical)
+
+        if not selected:
+            return slot
+
+        deduped = []
+        seen = set()
+        for value in selected:
+            key = value.upper() if value.upper() == "COUNT(*)" else value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(value)
+
+        updated_slot = dict(slot)
+        updated_slot["target_columns"] = deduped
+        updated_slot["target"] = ", ".join(deduped)
+        if candidate_info.get("group_key_override"):
+            updated_slot["group_key"] = candidate_info["group_key_override"]
+        return updated_slot
+
+    def _count_projection_candidate_info(self, template, slot, schema):
+        if template == "ENTITY_BY_RELATED_COUNT_TOP1":
+            entity_table = _clean_optional_text(slot.get("entity_table"))
+            return self._candidate_info_from_table_expr(schema, entity_table)
+
+        if template == "JOIN_GROUP_COUNT_TOP1":
+            entity_table = _clean_optional_text(slot.get("entity_table"))
+            return self._candidate_info_from_table_expr(schema, entity_table)
+
+        if template != "GROUP_COUNT_TOP1":
+            return None
+
+        table_expr = _clean_optional_text(slot.get("table"))
+        if not table_expr:
+            return None
+
+        table_exprs = [table_expr]
+        join_clause = _normalize_join_clause(slot.get("join_clause"))
+        for match in re.findall(
+            r"\bJOIN\s+([A-Za-z_][\w]*)\s*(?:AS\s+([A-Za-z_][\w]*)|([A-Za-z_][\w]*))?",
+            join_clause,
+            flags=re.I,
+        ):
+            join_table = match[0]
+            alias = match[1] or match[2]
+            table_exprs.append(f"{join_table} AS {alias}" if alias else join_table)
+
+        alias_map, default_table = schema.extract_alias_map(table_exprs)
+        table_refs = _extract_table_refs(table_exprs)
+        group_table, _ = schema.resolve_identifier(
+            slot.get("group_key", ""),
+            alias_map,
+            default_table,
+        )
+        if not group_table:
+            return None
+
+        target_tables = _collect_projection_tables(slot.get("target", ""), alias_map, default_table, schema)
+        answer_table_name = group_table
+        if len(target_tables) == 1:
+            answer_table_name = next(iter(target_tables))
+
+        table = schema.get_table(answer_table_name)
+        if not table:
+            return None
+
+        table_ref = table_refs.get(answer_table_name, table["name"])
+        result = {
+            "answer_table": table["name"],
+            "candidates": [
+                f"{table_ref}.{column_name}"
+                for column_name in table["columns"].values()
+            ],
+        }
+        if answer_table_name != group_table:
+            _, group_column = schema.resolve_identifier(
+                slot.get("group_key", ""),
+                alias_map,
+                default_table,
+            )
+            if group_column and schema.column_exists(answer_table_name, group_column):
+                result["group_key_override"] = f"{table_ref}.{table['columns'][group_column]}"
+        return result
+
+    def _candidate_info_from_table_expr(self, schema, table_expr):
+        parsed = _parse_table_expr(table_expr)
+        if not parsed:
+            return None
+
+        table = schema.get_table(parsed["base_table"])
+        if not table:
+            return None
+
+        return {
+            "answer_table": table["name"],
+            "candidates": [
+                f"{parsed['alias']}.{column_name}"
+                for column_name in table["columns"].values()
+            ],
+        }
 
     def _ensure_projection_complete(self, schema_info, question, template, slot, schema):
         if projection_is_complete(question, slot):
@@ -1304,12 +1509,12 @@ def projection_is_complete(question, slot):
 
 def uses_phase0_exclusion_layer(mode):
     mode = (mode or "v1").lower()
-    return mode in {"phase0", "v2", "phase1", "phase1_c", "phase1_d"}
+    return mode in {"phase0", "v2", "phase1", "phase1_c", "phase1_d", "phase1_e"}
 
 
 def uses_phase1_router(mode):
     mode = (mode or "").lower()
-    return mode in {"phase1", "phase1_c", "phase1_d"}
+    return mode in {"phase1", "phase1_c", "phase1_d", "phase1_e"}
 
 
 def uses_controlled_slot_filling(mode):
@@ -1319,12 +1524,17 @@ def uses_controlled_slot_filling(mode):
 
 def uses_entity_count_plan_mode(mode):
     mode = (mode or "").lower()
-    return mode == "phase1_d"
+    return mode in {"phase1_d", "phase1_e"}
+
+
+def uses_structured_projection_selector(mode):
+    mode = (mode or "").lower()
+    return mode == "phase1_e"
 
 
 def uses_projection_validator(mode):
     mode = (mode or "").lower()
-    return mode == "phase1_d"
+    return mode in {"phase1_d", "phase1_e"}
 
 
 def get_superlative_exclusion_reason(question, mode="v1"):
