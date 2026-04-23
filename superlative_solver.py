@@ -125,6 +125,7 @@ TEMPLATE_ORDER = [
     "ORDER_BY",
     "NESTED",
     "GROUP_COUNT_TOP1",
+    "ENTITY_BY_RELATED_COUNT_TOP1",
     "JOIN_GROUP_COUNT_TOP1",
     "JOIN_ORDER_BY",
 ]
@@ -133,6 +134,7 @@ TEMPLATE_DESCRIPTIONS = {
     "ORDER_BY": "Single-table top-1 object retrieval via ORDER BY ... LIMIT 1.",
     "NESTED": "Single-table extrema object retrieval via nested MIN/MAX comparison.",
     "GROUP_COUNT_TOP1": "Top-1 group by count via GROUP BY ... ORDER BY COUNT(*) ... LIMIT 1.",
+    "ENTITY_BY_RELATED_COUNT_TOP1": "Top-1 entity or entity attribute by counting related fact rows over an enumerated FK plan.",
     "JOIN_GROUP_COUNT_TOP1": "Top-1 entity by related row count via JOIN + GROUP BY + COUNT(*) + ORDER BY + LIMIT 1.",
     "JOIN_ORDER_BY": "Single-hop join object retrieval where target and measure are on different tables.",
 }
@@ -479,6 +481,60 @@ class SQLiteSchemaGraph:
             lines.append(f"- {table['name']}: {', '.join(columns)}")
         return "\n".join(lines)
 
+    def get_table(self, table_name):
+        return self.tables.get(self.canonical_table_name(table_name))
+
+    def qualified_column(self, table_name, column_name):
+        table = self.get_table(table_name)
+        if not table:
+            return ""
+        column = table["columns"].get(_strip_quotes(column_name).lower())
+        if not column:
+            return ""
+        return f"{table['name']}.{column}"
+
+    def table_columns(self, table_name):
+        table = self.get_table(table_name)
+        if not table:
+            return []
+        return [f"{table['name']}.{column_name}" for column_name in table["columns"].values()]
+
+    def entity_related_count_plans(self):
+        plans = []
+        seen = set()
+        for edge in self.foreign_keys:
+            fact_table = edge["source_table"]
+            entity_table = edge["target_table"]
+            fact_fk = edge["source_column"]
+            entity_key = edge["target_column"]
+            key = (
+                fact_table.lower(),
+                fact_fk.lower(),
+                entity_table.lower(),
+                entity_key.lower(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            plan_id = f"P{len(plans)}"
+            join_on = (
+                f"{entity_table}.{entity_key} = "
+                f"{fact_table}.{fact_fk}"
+            )
+            plans.append(
+                {
+                    "plan_id": plan_id,
+                    "entity_table": entity_table,
+                    "fact_table": fact_table,
+                    "entity_key": self.qualified_column(entity_table, entity_key),
+                    "fact_fk": self.qualified_column(fact_table, fact_fk),
+                    "join_on": join_on,
+                    "entity_columns": self.table_columns(entity_table),
+                    "fact_columns": self.table_columns(fact_table),
+                }
+            )
+        return plans
+
 
 class SuperlativePatternSolver:
     ROUTE_SYSTEM_PROMPT = (
@@ -545,7 +601,7 @@ class SuperlativePatternSolver:
         candidate_templates = []
 
         if uses_phase1_router(self.mode):
-            candidate_templates = get_candidate_templates(question, slot_hint, schema)
+            candidate_templates = get_candidate_templates(question, slot_hint, schema, mode=self.mode)
             if not candidate_templates:
                 return {
                     "matched": False,
@@ -613,6 +669,18 @@ class SuperlativePatternSolver:
                     "candidate_templates": candidate_templates,
                     "router_decision": router_decision,
                 }
+
+        if uses_projection_validator(self.mode) and not projection_is_complete(question, slot):
+            return {
+                "matched": True,
+                "applied": False,
+                "reason": "projection_incomplete",
+                "template": template,
+                "slot_hint": slot_hint,
+                "slot": slot,
+                "candidate_templates": candidate_templates,
+                "router_decision": router_decision,
+            }
 
         sql = build_sql(template, slot)
         if not sql:
@@ -717,6 +785,9 @@ Rules:
         }
 
     def _extract_slots(self, schema_info, question, template, schema=None):
+        if template == "ENTITY_BY_RELATED_COUNT_TOP1":
+            return self._extract_entity_related_count_slot(schema_info, question, schema)
+
         prompt = self._slot_prompt(schema_info, question, template, schema=schema)
         raw = self.coder.generate_response(
             [{"role": "user", "content": prompt}],
@@ -732,6 +803,96 @@ Rules:
             slot["condition"] = _normalize_condition(slot["condition"])
         if "join_clause" in slot:
             slot["join_clause"] = _normalize_join_clause(slot["join_clause"])
+        return slot
+
+    def _extract_entity_related_count_slot(self, schema_info, question, schema):
+        if schema is None:
+            return None
+
+        plans = schema.entity_related_count_plans()
+        if not plans:
+            return None
+
+        plan_lines = []
+        for plan in plans:
+            plan_lines.append(
+                "\n".join(
+                    [
+                        f"- plan_id: {plan['plan_id']}",
+                        f"  entity_table: {plan['entity_table']}",
+                        f"  fact_table: {plan['fact_table']}",
+                        f"  join_on: {plan['join_on']}",
+                        f"  default_group_by: {plan['entity_key']}",
+                        f"  entity_columns: {', '.join(plan['entity_columns'])}",
+                        f"  fact_columns: {', '.join(plan['fact_columns'])}",
+                    ]
+                )
+            )
+
+        prompt = f"""Schema:
+{schema_info}
+
+Question:
+{question}
+
+Enumerated FK count plans:
+{chr(10).join(plan_lines)}
+
+Return JSON with this exact format:
+{{
+  "plan_id": "",
+  "target_columns": [],
+  "group_by_column": "",
+  "order": "ASC or DESC",
+  "condition": "",
+  "include_count": false
+}}
+
+Rules:
+- Choose exactly one plan_id from Enumerated FK count plans.
+- Choose a plan where entity_table is the answer object and fact_table rows are what should be counted.
+- target_columns must come from the chosen plan's entity_columns. Include every entity column explicitly requested by the question.
+- group_by_column must come from the chosen plan's entity_columns. Prefer default_group_by for an entity answer; use a target attribute only when the question asks for an attribute group such as city, country, language, grade, or continent.
+- order is DESC for most/highest/largest/greatest and ASC for fewest/least/lowest/smallest.
+- condition may reference columns from the chosen entity/fact plan. Keep it empty when no WHERE clause is needed.
+- include_count is true only when the question explicitly asks to output the count/number itself.
+- Do not write SQL.
+- Output JSON only.
+"""
+        raw = self.coder.generate_response(
+            [{"role": "user", "content": prompt}],
+            system_prompt=self.SLOT_SYSTEM_PROMPT,
+            max_new_tokens=360,
+        )
+        data = _parse_json_like(raw)
+        if not isinstance(data, dict):
+            return None
+
+        plan_id = _clean_optional_text(data.get("plan_id"))
+        plan = next((item for item in plans if item["plan_id"].lower() == plan_id.lower()), None)
+        if not plan:
+            return None
+
+        target_columns = _clean_string_list(data.get("target_columns"))
+        group_by_column = _clean_optional_text(data.get("group_by_column")) or plan["entity_key"]
+        include_count = _coerce_bool(data.get("include_count"))
+        if include_count and "COUNT(*)" not in {col.upper() for col in target_columns}:
+            target_columns.append("COUNT(*)")
+
+        slot = {
+            "plan_id": plan["plan_id"],
+            "entity_table": plan["entity_table"],
+            "fact_table": plan["fact_table"],
+            "entity_key": plan["entity_key"],
+            "fact_fk": plan["fact_fk"],
+            "join_on": plan["join_on"],
+            "target_columns": target_columns,
+            "target": ", ".join(target_columns),
+            "group_by_column": group_by_column,
+            "order": _clean_optional_text(data.get("order")) or "DESC",
+            "condition": _normalize_condition(data.get("condition")),
+            "include_count": include_count,
+        }
         return slot
 
     def _ensure_projection_complete(self, schema_info, question, template, slot, schema):
@@ -799,6 +960,7 @@ Rules:
             f"- is_count_superlative: {str(is_count_superlative(question)).lower()}",
             f"- is_group_count_superlative: {str(is_group_count_superlative(question, slot_hint)).lower()}",
             f"- is_join_group_count_superlative: {str(is_join_group_count_superlative(question, slot_hint, schema)).lower()}",
+            f"- has_entity_related_count_plans: {str(bool(schema.entity_related_count_plans())).lower()}",
             f"- is_single_hop_join_superlative: {str(is_single_hop_join_superlative(slot_hint, schema)).lower()}",
             f"- looks_like_nested_extrema: {str(any(token in question.lower() for token in ['minimum', 'smallest'])).lower()}",
             f"- target_table: {slot_hint.get('target_table', '')}",
@@ -821,7 +983,7 @@ Structural signals:
 Return JSON with this format:
 {{
   "use_template_score": 0.0,
-  "selected_template": "ORDER_BY | NESTED | GROUP_COUNT_TOP1 | JOIN_GROUP_COUNT_TOP1 | JOIN_ORDER_BY | FALLBACK",
+  "selected_template": "ORDER_BY | NESTED | GROUP_COUNT_TOP1 | ENTITY_BY_RELATED_COUNT_TOP1 | JOIN_GROUP_COUNT_TOP1 | JOIN_ORDER_BY | FALLBACK",
   "template_scores": {{
     {all_template_scores}
   }},
@@ -834,6 +996,7 @@ Rules:
 - Prefer precision over recall.
 - If uncertain, return low scores and choose FALLBACK.
 - Base your decision on structural fit, not just lexical overlap.
+- For entity-by-related-row-count questions, prefer ENTITY_BY_RELATED_COUNT_TOP1 over GROUP_COUNT_TOP1 because its join plan is schema-enumerated.
 - Output JSON only.
 """
         raw = self.coder.generate_response(
@@ -1141,17 +1304,27 @@ def projection_is_complete(question, slot):
 
 def uses_phase0_exclusion_layer(mode):
     mode = (mode or "v1").lower()
-    return mode in {"phase0", "v2", "phase1", "phase1_c"}
+    return mode in {"phase0", "v2", "phase1", "phase1_c", "phase1_d"}
 
 
 def uses_phase1_router(mode):
     mode = (mode or "").lower()
-    return mode in {"phase1", "phase1_c"}
+    return mode in {"phase1", "phase1_c", "phase1_d"}
 
 
 def uses_controlled_slot_filling(mode):
     mode = (mode or "").lower()
     return mode == "phase1_c"
+
+
+def uses_entity_count_plan_mode(mode):
+    mode = (mode or "").lower()
+    return mode == "phase1_d"
+
+
+def uses_projection_validator(mode):
+    mode = (mode or "").lower()
+    return mode == "phase1_d"
 
 
 def get_superlative_exclusion_reason(question, mode="v1"):
@@ -1182,9 +1355,12 @@ def get_superlative_exclusion_reason(question, mode="v1"):
     return None
 
 
-def get_candidate_templates(question, slot_hint, schema):
+def get_candidate_templates(question, slot_hint, schema, mode="phase1"):
     q = question.lower()
     candidates = []
+
+    if uses_entity_count_plan_mode(mode) and is_join_group_count_superlative(question, slot_hint, schema):
+        candidates.append("ENTITY_BY_RELATED_COUNT_TOP1")
 
     if is_join_group_count_superlative(question, slot_hint, schema):
         candidates.append("JOIN_GROUP_COUNT_TOP1")
@@ -1274,6 +1450,8 @@ def build_sql(template, slot):
         return build_sql_nested(slot)
     if template == "GROUP_COUNT_TOP1":
         return build_sql_group_count(slot)
+    if template == "ENTITY_BY_RELATED_COUNT_TOP1":
+        return build_sql_entity_related_count(slot)
     if template == "JOIN_GROUP_COUNT_TOP1":
         return build_sql_join_group_count(slot)
     if template == "JOIN_ORDER_BY":
@@ -1359,6 +1537,28 @@ def build_sql_join_group_count(slot):
     if condition:
         sql += f" WHERE {condition}"
     sql += f" GROUP BY {group_key} ORDER BY COUNT(*) {order} LIMIT 1"
+    return sql
+
+
+def build_sql_entity_related_count(slot):
+    entity_table = _clean_optional_text(slot.get("entity_table"))
+    fact_table = _clean_optional_text(slot.get("fact_table"))
+    target = _clean_optional_text(slot.get("target"))
+    join_on = _clean_optional_text(slot.get("join_on"))
+    group_by_column = _clean_optional_text(slot.get("group_by_column")) or _clean_optional_text(slot.get("entity_key"))
+    order = _clean_optional_text(slot.get("order")) or "DESC"
+    condition = _normalize_condition(slot.get("condition"))
+
+    if not entity_table or not fact_table or not target or not join_on or not group_by_column:
+        return ""
+
+    sql = (
+        f"SELECT {target} FROM {entity_table} "
+        f"JOIN {fact_table} ON {join_on}"
+    )
+    if condition:
+        sql += f" WHERE {condition}"
+    sql += f" GROUP BY {group_by_column} ORDER BY COUNT(*) {order} LIMIT 1"
     return sql
 
 
@@ -1545,6 +1745,50 @@ def validate_join_group_count(slot, schema):
     )
 
 
+def validate_entity_related_count(slot, schema):
+    entity_table = _clean_optional_text(slot.get("entity_table"))
+    fact_table = _clean_optional_text(slot.get("fact_table"))
+    if not schema.table_exists(entity_table) or not schema.table_exists(fact_table):
+        return False
+
+    entity_base = schema.canonical_table_name(entity_table)
+    fact_base = schema.canonical_table_name(fact_table)
+    if not entity_base or not fact_base or entity_base == fact_base:
+        return False
+
+    if not schema.has_direct_fk_path(entity_table, fact_table):
+        return False
+
+    alias_map, default_table = schema.extract_alias_map([entity_table, fact_table])
+    del default_table
+
+    if not _validate_projection(slot.get("target", ""), alias_map, None, schema):
+        return False
+
+    projection_tables = _collect_projection_tables(slot.get("target", ""), alias_map, None, schema)
+    if not projection_tables:
+        return False
+    if any(table_name != entity_base for table_name in projection_tables):
+        return False
+
+    group_table, group_column = schema.resolve_identifier(
+        slot.get("group_by_column", "") or slot.get("entity_key", ""),
+        alias_map,
+        None,
+    )
+    if not schema.column_exists(group_table, group_column):
+        return False
+    if group_table != entity_base:
+        return False
+
+    return _validate_join_predicate(
+        slot.get("join_on", ""),
+        alias_map,
+        schema,
+        required_tables={entity_base, fact_base},
+    )
+
+
 def validate_single_hop_join(slot, schema):
     left_table = _clean_optional_text(slot.get("left_table"))
     right_table = _clean_optional_text(slot.get("right_table"))
@@ -1582,6 +1826,8 @@ def validate_by_template(template, slot, schema):
         return validate(slot, schema)
     if template == "GROUP_COUNT_TOP1":
         return validate_group_count(slot, schema)
+    if template == "ENTITY_BY_RELATED_COUNT_TOP1":
+        return validate_entity_related_count(slot, schema)
     if template == "JOIN_GROUP_COUNT_TOP1":
         return validate_join_group_count(slot, schema)
     if template == "JOIN_ORDER_BY":
