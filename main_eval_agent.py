@@ -266,6 +266,9 @@ def run_evaluation():
                     "schema_value_hint_candidate_columns": retrieval_info["value_hint_candidate_columns"],
                     "semantic_retry_count": 0,
                     "final_verifier_result": None,
+                    "used_success_fallback": False,
+                    "success_fallback_reason": None,
+                    "selected_success_attempt": None,
                 }
             else:
                 had_reflexion = agent_result.get("attempts", 1) > 1
@@ -317,6 +320,9 @@ def run_evaluation():
                     "schema_value_hint_candidate_columns": retrieval_info["value_hint_candidate_columns"],
                     "semantic_retry_count": agent_result.get("semantic_retry_count", 0),
                     "final_verifier_result": make_jsonable(agent_result.get("final_verifier_result")),
+                    "used_success_fallback": agent_result.get("used_success_fallback", False),
+                    "success_fallback_reason": agent_result.get("success_fallback_reason"),
+                    "selected_success_attempt": agent_result.get("selected_success_attempt"),
                 }
                 summary_record["route"] = agent_result.get("route", "generic_llm")
                 if agent_result.get("pattern_result"):

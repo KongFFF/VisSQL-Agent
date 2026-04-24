@@ -64,6 +64,29 @@ class VisSQLAgent:
             if verbose:
                 print(message)
 
+        def normalize_sql_signature(sql_text: str) -> str:
+            return " ".join(str(sql_text).lower().split())
+
+        def build_success_response(selected_candidate: dict, attempts_used: int, fallback_reason: str | None = None):
+            return {
+                "final_sql": selected_candidate["sql"],
+                "is_success": True,
+                "attempts": attempts_used,
+                "data": selected_candidate["result"],
+                "memory_messages": memory.snapshot(),
+                "attempt_records": attempt_records,
+                "probe_logs": probe_logs,
+                "had_probe": bool(probe_logs),
+                "db_path": self.sandbox.db_path,
+                "route": "generic_llm",
+                "pattern_result": pattern_result,
+                "semantic_retry_count": semantic_retry_count,
+                "final_verifier_result": selected_candidate.get("verifier_result"),
+                "used_success_fallback": fallback_reason is not None,
+                "success_fallback_reason": fallback_reason,
+                "selected_success_attempt": selected_candidate["attempt"],
+            }
+
         if db_path:
             self.sandbox.set_db_path(db_path)
 
@@ -122,6 +145,9 @@ class VisSQLAgent:
         probe_logs = []
         semantic_retry_count = 0
         last_verifier_result = None
+        first_success_candidate = None
+        last_retry_signature = ()
+        last_retry_sql = ""
 
         # ==========================================
         # 🔄 Agent 的灵魂：Reflexion (自我反思) 循环
@@ -151,6 +177,14 @@ class VisSQLAgent:
                 log(f"✅ 执行成功！查出 {result['row_count']} 条数据。")
                 log(f"📊 数据抽样: {result['results'][:2]}")
 
+                if result["row_count"] > 0 and first_success_candidate is None:
+                    first_success_candidate = {
+                        "sql": generated_sql,
+                        "result": result,
+                        "attempt": attempt,
+                        "verifier_result": None,
+                    }
+
                 verifier_result = self.semantic_verifier.verify(
                     question=user_question,
                     sql=generated_sql,
@@ -163,35 +197,72 @@ class VisSQLAgent:
                     flag for flag in verifier_result.get("risk_flags", [])
                     if flag.get("severity") == "high"
                 ]
+                high_risk_signature = tuple(sorted(flag.get("type", "") for flag in high_risk_flags))
+                normalized_generated_sql = normalize_sql_signature(generated_sql)
+                if (
+                    first_success_candidate is not None
+                    and first_success_candidate["attempt"] == attempt
+                    and first_success_candidate["verifier_result"] is None
+                ):
+                    first_success_candidate["verifier_result"] = verifier_result
                 if high_risk_flags:
                     log("语义校验器发现高风险 SQL，准备进行定点修复重写...")
                     for flag in high_risk_flags:
                         log(f"  - {flag['type']}: {flag['message']}")
 
+                if (
+                    high_risk_signature
+                    and high_risk_signature == last_retry_signature
+                    and normalized_generated_sql == last_retry_sql
+                    and first_success_candidate is not None
+                    and first_success_candidate["attempt"] < attempt
+                ):
+                    log("Semantic verifier loop detected; falling back to the first successful SQL.")
+                    attempt_record["feedback_type"] = "SemanticVerifierLoop"
+                    attempt_records.append(attempt_record)
+                    return build_success_response(
+                        first_success_candidate,
+                        attempt,
+                        fallback_reason="semantic_retry_loop",
+                    )
+
                 if verifier_result.get("should_retry", False) and high_risk_flags and attempt < self.max_retries:
                     semantic_retry_count += 1
                     memory.add_semantic_feedback(verifier_result)
                     attempt_record["feedback_type"] = "SemanticVerifier"
+                    attempt_record["high_risk_signature"] = list(high_risk_signature)
                     attempt_records.append(attempt_record)
+                    last_retry_signature = high_risk_signature
+                    last_retry_sql = normalized_generated_sql
                     continue
+
+                last_retry_signature = ()
+                last_retry_sql = ""
+
+                if (
+                    high_risk_flags
+                    and first_success_candidate is not None
+                    and first_success_candidate["attempt"] < attempt
+                ):
+                    log("Final semantic risk persists; falling back to the first successful SQL.")
+                    attempt_records.append(attempt_record)
+                    return build_success_response(
+                        first_success_candidate,
+                        attempt,
+                        fallback_reason="final_semantic_risk",
+                    )
 
                 if result["row_count"] > 0 or not self.retry_on_empty_result:
                     attempt_records.append(attempt_record)
-                    return {
-                        "final_sql": generated_sql,
-                        "is_success": True,
-                        "attempts": attempt,
-                        "data": result,
-                        "memory_messages": memory.snapshot(),
-                        "attempt_records": attempt_records,
-                        "probe_logs": probe_logs,
-                        "had_probe": bool(probe_logs),
-                        "db_path": self.sandbox.db_path,
-                        "route": "generic_llm",
-                        "pattern_result": pattern_result,
-                        "semantic_retry_count": semantic_retry_count,
-                        "final_verifier_result": last_verifier_result
-                    }
+                    return build_success_response(
+                        {
+                            "sql": generated_sql,
+                            "result": result,
+                            "attempt": attempt,
+                            "verifier_result": verifier_result,
+                        },
+                        attempt,
+                    )
 
                 if attempt < self.max_retries:
                     log("🔄 查询虽然执行成功，但结果为空，触发 Reflexion 重新审视筛选条件/连接逻辑...")
@@ -216,6 +287,13 @@ class VisSQLAgent:
                 else:
                     log("💀 已达到最大重试次数，但查询结果始终为空，Agent 停止重试。")
                     attempt_records.append(attempt_record)
+                    if first_success_candidate is not None:
+                        log("Retry ended with empty results; falling back to the first successful SQL.")
+                        return build_success_response(
+                            first_success_candidate,
+                            attempt,
+                            fallback_reason="retry_empty_after_success",
+                        )
                     return {
                         "final_sql": generated_sql,
                         "is_success": False,
@@ -230,7 +308,10 @@ class VisSQLAgent:
                         "route": "generic_llm",
                         "pattern_result": pattern_result,
                         "semantic_retry_count": semantic_retry_count,
-                        "final_verifier_result": last_verifier_result
+                        "final_verifier_result": last_verifier_result,
+                        "used_success_fallback": False,
+                        "success_fallback_reason": None,
+                        "selected_success_attempt": None,
                     }
                 
             elif result["status"] == "error":
@@ -244,6 +325,13 @@ class VisSQLAgent:
                 else:
                     log("💀 已达到最大重试次数，Agent 放弃挣扎。")
                     attempt_records.append(attempt_record)
+                    if first_success_candidate is not None:
+                        log("Retry ended with execution error; falling back to the first successful SQL.")
+                        return build_success_response(
+                            first_success_candidate,
+                            attempt,
+                            fallback_reason="retry_error_after_success",
+                        )
                     return {
                         "final_sql": generated_sql,
                         "is_success": False,
@@ -257,7 +345,10 @@ class VisSQLAgent:
                         "route": "generic_llm",
                         "pattern_result": pattern_result,
                         "semantic_retry_count": semantic_retry_count,
-                        "final_verifier_result": last_verifier_result
+                        "final_verifier_result": last_verifier_result,
+                        "used_success_fallback": False,
+                        "success_fallback_reason": None,
+                        "selected_success_attempt": None,
                     }
 
             attempt_records.append(attempt_record)

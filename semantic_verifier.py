@@ -326,16 +326,6 @@ class SemanticVerifier:
                 }
             )
 
-        if _question_requests_each(question) and not has_group:
-            flags.append(
-                {
-                    "type": "missing_group_by",
-                    "severity": "high",
-                    "message": "Question implies per-group output, but SQL has no GROUP BY clause.",
-                    "repair_hint": "The question asks for per-group results. Add a GROUP BY on the requested entity or grouping key.",
-                }
-            )
-
         if has_group:
             non_agg_identifiers = _extract_non_agg_identifiers(select_exprs)
             group_columns = {_normalize_identifier(expr) for expr in group_exprs}
