@@ -31,6 +31,30 @@ class WorkingMemory:
         )
         # 这里的 user 代表“沙盒环境”向大模型发出的反馈
         self.messages.append({"role": "user", "content": feedback_prompt})
+
+    def add_semantic_feedback(self, verifier_result: dict):
+        """将语义校验器的风险提示转成定点修复指令。"""
+        risk_flags = verifier_result.get("risk_flags", [])
+        repair_hints = verifier_result.get("repair_hints", [])
+
+        risk_lines = []
+        for flag in risk_flags:
+            risk_lines.append(
+                f"- [{flag.get('severity', 'medium')}] {flag.get('type', 'semantic_risk')}: {flag.get('message', '')}"
+            )
+
+        hint_lines = [f"- {hint}" for hint in repair_hints]
+        feedback_prompt = (
+            "【语义校验器拦截】\n"
+            "你刚刚生成的 SQL 虽然可以执行，但存在较高的语义风险，可能答非所问。\n"
+            f"校验得分: {verifier_result.get('score', 0.0)}\n"
+            "风险信号：\n"
+            f"{chr(10).join(risk_lines) if risk_lines else '- semantic risk detected'}\n"
+            "修复提示：\n"
+            f"{chr(10).join(hint_lines) if hint_lines else '- Re-check filters, grouping grain, and set semantics.'}\n"
+            "请保留已经正确的部分，只修复高风险的过滤列、分组粒度、投影列或集合运算结构，并输出修正后的 SQL。"
+        )
+        self.messages.append({"role": "user", "content": feedback_prompt})
         
     def get_current_messages(self) -> list:
         """吐出干干净净的对话列表，直接喂给 Coder"""
