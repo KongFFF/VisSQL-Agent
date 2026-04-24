@@ -1,5 +1,7 @@
+import difflib
 import json
 import re
+import sqlite3
 from collections import deque
 from pathlib import Path
 
@@ -70,6 +72,108 @@ SELECTIVE_PATH_HINT_KEYWORDS = {
     "without",
 }
 
+VALUE_HINT_COLUMN_KEYWORDS = {
+    "name",
+    "title",
+    "type",
+    "category",
+    "status",
+    "country",
+    "continent",
+    "region",
+    "city",
+    "state",
+    "province",
+    "language",
+    "code",
+    "airport",
+    "airline",
+    "maker",
+    "model",
+    "official",
+    "form",
+    "gender",
+    "sex",
+}
+
+VALUE_HINT_EXACT_COLUMN_SCORES = {
+    "name": 4.5,
+    "title": 4.0,
+    "type": 4.0,
+    "country": 5.0,
+    "continent": 5.0,
+    "region": 5.5,
+    "city": 4.5,
+    "state": 4.5,
+    "language": 5.0,
+    "code": 2.5,
+    "airportcode": 5.0,
+    "airportname": 4.5,
+    "airline": 4.5,
+    "abbreviation": 3.5,
+    "fullname": 4.5,
+    "maker": 4.0,
+    "model": 4.0,
+    "governmentform": 2.5,
+    "isofficial": 5.0,
+}
+
+VALUE_HINT_MEASURE_KEYWORDS = {
+    "id",
+    "year",
+    "age",
+    "count",
+    "number",
+    "amount",
+    "total",
+    "sum",
+    "avg",
+    "average",
+    "min",
+    "max",
+    "population",
+    "price",
+    "cost",
+    "weight",
+    "height",
+    "capacity",
+    "score",
+    "rank",
+    "time",
+    "date",
+    "duration",
+    "percentage",
+    "percent",
+}
+
+QUESTION_ENTITY_STOPWORDS = {
+    "How",
+    "What",
+    "Which",
+    "Who",
+    "Where",
+    "When",
+    "Why",
+    "Give",
+    "Show",
+    "List",
+    "Find",
+    "Return",
+    "Count",
+    "Tell",
+    "Airport",
+    "Airports",
+    "Airline",
+    "Airlines",
+    "Country",
+    "Countries",
+    "City",
+    "Cities",
+    "State",
+    "Language",
+    "Languages",
+}
+
 
 def normalize_identifier_tokens(text: str) -> list:
     normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
@@ -89,6 +193,402 @@ def normalize_identifier_tokens(text: str) -> list:
 
 def question_tokens(question: str) -> list:
     return [token for token in normalize_identifier_tokens(question) if token not in STOPWORDS]
+
+
+def preview_literal(value, max_len: int = 48) -> str:
+    text = str(value).strip()
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
+
+def quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def extract_question_entities(question: str) -> list:
+    entities = []
+    seen = set()
+
+    def add_entity(value: str):
+        value = value.strip().strip("`\"'")
+        if not value:
+            return
+        key = value.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        entities.append(value)
+
+    for value in re.findall(r'["\'`]{1}([^"\'`]+)["\'`]{1}', question):
+        add_entity(value)
+
+    for value in re.findall(r"\b[A-Z]{2,5}\b", question):
+        add_entity(value)
+
+    for match in re.finditer(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", question):
+        value = match.group(0)
+        if value in QUESTION_ENTITY_STOPWORDS:
+            continue
+        add_entity(value)
+
+    return entities[:8]
+
+
+class SQLiteValueSketcher:
+    def __init__(
+        self,
+        enabled: bool = True,
+        max_candidate_columns: int = 10,
+        max_columns_per_table: int = 4,
+        max_samples_per_column: int = 5,
+        max_entity_matches: int = 10,
+    ):
+        self.enabled = enabled
+        self.max_candidate_columns = max_candidate_columns
+        self.max_columns_per_table = max_columns_per_table
+        self.max_samples_per_column = max_samples_per_column
+        self.max_entity_matches = max_entity_matches
+        self._table_info_cache = {}
+        self._distinct_value_cache = {}
+
+    def build_plan(
+        self,
+        question: str,
+        schema_meta: dict,
+        selected_tables: list,
+        seed_tables: list,
+        db_path: str | None,
+    ) -> dict:
+        default_plan = {
+            "enabled": False,
+            "question_entities": [],
+            "entity_matches": [],
+            "sampled_values": [],
+            "candidate_columns": [],
+        }
+        if not self.enabled or not db_path or not selected_tables:
+            return default_plan
+
+        question_entity_values = extract_question_entities(question)
+        candidate_columns = self._rank_candidate_columns(
+            question=question,
+            schema_meta=schema_meta,
+            selected_tables=selected_tables,
+            seed_tables=seed_tables,
+            db_path=db_path,
+        )
+        entity_matches = self._collect_entity_matches(
+            db_path=db_path,
+            question_entities=question_entity_values,
+            candidate_columns=candidate_columns,
+        )
+        sampled_values = self._collect_sampled_values(
+            db_path=db_path,
+            candidate_columns=candidate_columns,
+            matched_columns={
+                (item["table"], item["column"])
+                for item in entity_matches
+            },
+        )
+
+        return {
+            "enabled": bool(entity_matches or sampled_values),
+            "question_entities": question_entity_values,
+            "entity_matches": entity_matches,
+            "sampled_values": sampled_values,
+            "candidate_columns": [
+                {
+                    "table": item["table"],
+                    "column": item["column"],
+                    "score": round(item["score"], 3),
+                }
+                for item in candidate_columns
+            ],
+        }
+
+    def _connect(self, db_path: str):
+        db_uri = f"file:{Path(db_path).resolve().as_posix()}?mode=ro"
+        return sqlite3.connect(db_uri, uri=True)
+
+    def _get_table_columns(self, db_path: str, table_name: str) -> dict:
+        cache_key = (db_path, table_name)
+        cached = self._table_info_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        columns = {}
+        conn = None
+        try:
+            conn = self._connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA table_info({quote_identifier(table_name)})")
+            for _, name, declared_type, _, _, _ in cursor.fetchall():
+                type_text = (declared_type or "").upper()
+                is_text_like = any(token in type_text for token in ("CHAR", "TEXT", "CLOB"))
+                is_numeric_like = any(token in type_text for token in ("INT", "REAL", "FLOA", "DOUB", "NUM"))
+                columns[name] = {
+                    "declared_type": declared_type or "",
+                    "is_text_like": is_text_like or not type_text,
+                    "is_numeric_like": is_numeric_like,
+                }
+        except sqlite3.Error:
+            columns = {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        self._table_info_cache[cache_key] = columns
+        return columns
+
+    def _rank_candidate_columns(
+        self,
+        question: str,
+        schema_meta: dict,
+        selected_tables: list,
+        seed_tables: list,
+        db_path: str,
+    ) -> list:
+        token_set = set(question_tokens(question))
+        question_entities = extract_question_entities(question)
+        has_code_like_entity = any(re.fullmatch(r"[A-Z]{2,5}", value) for value in question_entities)
+        seed_table_set = set(seed_tables)
+        ranked = []
+
+        for table_name in selected_tables:
+            table_columns = self._get_table_columns(db_path, table_name)
+            table_ranked = []
+
+            for column in schema_meta["tables"][table_name]["columns"]:
+                column_name = column["name"]
+                column_tokens = column["tokens"]
+                normalized_column_name = column_name.lower()
+                info = table_columns.get(
+                    column_name,
+                    {
+                        "declared_type": "",
+                        "is_text_like": True,
+                        "is_numeric_like": False,
+                    },
+                )
+
+                overlap = len(token_set & column_tokens)
+                semantic_bonus = 0.0
+                semantic_bonus += VALUE_HINT_EXACT_COLUMN_SCORES.get(normalized_column_name, 0.0)
+                if any(keyword in normalized_column_name for keyword in VALUE_HINT_COLUMN_KEYWORDS):
+                    semantic_bonus += 2.0
+                if has_code_like_entity and "code" in normalized_column_name:
+                    semantic_bonus += 3.0
+                if normalized_column_name.startswith("is_") or normalized_column_name.startswith("has_"):
+                    semantic_bonus += 2.0
+
+                score = overlap * 5.0 + semantic_bonus
+                if info["is_text_like"]:
+                    score += 1.0
+                if table_name in seed_table_set:
+                    score += 0.75
+
+                looks_like_measure = (
+                    not info["is_text_like"]
+                    and any(keyword in normalized_column_name for keyword in VALUE_HINT_MEASURE_KEYWORDS)
+                )
+                if looks_like_measure and overlap == 0 and semantic_bonus == 0:
+                    continue
+                if score <= 0:
+                    continue
+
+                table_ranked.append(
+                    {
+                        "table": table_name,
+                        "column": column_name,
+                        "score": score,
+                        "is_text_like": info["is_text_like"],
+                        "normalized_column_name": normalized_column_name,
+                    }
+                )
+
+            table_ranked.sort(key=lambda item: (-item["score"], item["column"].lower()))
+            ranked.extend(table_ranked[: self.max_columns_per_table])
+
+        ranked.sort(key=lambda item: (-item["score"], item["table"].lower(), item["column"].lower()))
+        return ranked[: self.max_candidate_columns]
+
+    def _collect_entity_matches(
+        self,
+        db_path: str,
+        question_entities: list,
+        candidate_columns: list,
+    ) -> list:
+        matches = []
+
+        for entity in question_entities:
+            exact_matches = []
+            fuzzy_matches = []
+
+            for column_info in candidate_columns:
+                if not column_info["is_text_like"]:
+                    continue
+
+                matched_values, match_type = self._find_matching_values(
+                    db_path=db_path,
+                    table_name=column_info["table"],
+                    column_name=column_info["column"],
+                    entity=entity,
+                )
+                if not matched_values:
+                    continue
+
+                record = {
+                    "question_value": entity,
+                    "table": column_info["table"],
+                    "column": column_info["column"],
+                    "match_type": match_type,
+                    "values": matched_values,
+                }
+                if match_type == "exact":
+                    exact_matches.append(record)
+                else:
+                    fuzzy_matches.append(record)
+
+            entity_records = exact_matches or fuzzy_matches
+            matches.extend(entity_records[:2])
+            if len(matches) >= self.max_entity_matches:
+                break
+
+        return matches[: self.max_entity_matches]
+
+    def _find_matching_values(
+        self,
+        db_path: str,
+        table_name: str,
+        column_name: str,
+        entity: str,
+    ) -> tuple[list, str | None]:
+        column_expr = f"CAST({quote_identifier(column_name)} AS TEXT)"
+        base_sql = (
+            f"SELECT DISTINCT {column_expr} "
+            f"FROM {quote_identifier(table_name)} "
+            f"WHERE {column_expr} IS NOT NULL"
+        )
+
+        conn = None
+        try:
+            conn = self._connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                base_sql + f" AND lower({column_expr}) = lower(?) LIMIT ?",
+                (entity, self.max_samples_per_column),
+            )
+            exact_rows = [preview_literal(row[0]) for row in cursor.fetchall() if row and row[0] is not None]
+            if exact_rows:
+                return exact_rows, "exact"
+
+            if len(entity) >= 4 and not re.fullmatch(r"[A-Z]{2,5}", entity):
+                cursor.execute(
+                    base_sql + f" AND {column_expr} LIKE ? COLLATE NOCASE LIMIT ?",
+                    (f"%{entity}%", self.max_samples_per_column),
+                )
+                fuzzy_rows = [preview_literal(row[0]) for row in cursor.fetchall() if row and row[0] is not None]
+                if fuzzy_rows:
+                    return fuzzy_rows, "fuzzy"
+
+                preview_values = self._get_distinct_values(
+                    db_path=db_path,
+                    table_name=table_name,
+                    column_name=column_name,
+                    limit=max(25, self.max_samples_per_column),
+                )
+                approx_rows = difflib.get_close_matches(
+                    entity,
+                    preview_values,
+                    n=self.max_samples_per_column,
+                    cutoff=0.72,
+                )
+                if approx_rows:
+                    return approx_rows, "approx"
+        except sqlite3.Error:
+            return [], None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        return [], None
+
+    def _collect_sampled_values(
+        self,
+        db_path: str,
+        candidate_columns: list,
+        matched_columns: set,
+    ) -> list:
+        sampled = []
+
+        for column_info in candidate_columns:
+            if not column_info["is_text_like"] and (column_info["table"], column_info["column"]) not in matched_columns:
+                continue
+
+            values = self._get_distinct_values(
+                db_path=db_path,
+                table_name=column_info["table"],
+                column_name=column_info["column"],
+            )
+            if not values:
+                continue
+
+            sampled.append(
+                {
+                    "table": column_info["table"],
+                    "column": column_info["column"],
+                    "values": values,
+                }
+            )
+            if len(sampled) >= self.max_candidate_columns:
+                break
+
+        return sampled
+
+    def _get_distinct_values(
+        self,
+        db_path: str,
+        table_name: str,
+        column_name: str,
+        limit: int | None = None,
+    ) -> list:
+        limit = limit or self.max_samples_per_column
+        cache_key = (db_path, table_name, column_name, limit)
+        cached = self._distinct_value_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        values = []
+        column_expr = f"CAST({quote_identifier(column_name)} AS TEXT)"
+        sql = (
+            f"SELECT DISTINCT {column_expr} "
+            f"FROM {quote_identifier(table_name)} "
+            f"WHERE {column_expr} IS NOT NULL "
+            f"AND TRIM({column_expr}) != '' "
+            f"LIMIT ?"
+        )
+
+        conn = None
+        try:
+            conn = self._connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(sql, (limit,))
+            values = [preview_literal(row[0]) for row in cursor.fetchall() if row and row[0] is not None]
+        except sqlite3.Error:
+            values = []
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        self._distinct_value_cache[cache_key] = values
+        return values
 
 
 def build_schema_metadata_dict(tables_path: Path) -> dict:
@@ -355,6 +855,7 @@ def render_schema_v6(
     selected_tables: list | None = None,
     seed_tables: list | None = None,
     path_hint_plan: dict | None = None,
+    value_hint_plan: dict | None = None,
 ) -> str:
     if selected_tables is None:
         selected_tables = list(schema_meta["table_order"])
@@ -366,6 +867,14 @@ def render_schema_v6(
             "focus_tables": seed_tables,
             "foreign_keys": [],
             "join_paths": [],
+        }
+    if value_hint_plan is None:
+        value_hint_plan = {
+            "enabled": False,
+            "question_entities": [],
+            "entity_matches": [],
+            "sampled_values": [],
+            "candidate_columns": [],
         }
 
     selected_table_set = set(selected_tables)
@@ -417,6 +926,29 @@ def render_schema_v6(
             for path in join_paths:
                 schema_lines.append(f"- {path}")
 
+    if value_hint_plan.get("enabled"):
+        question_entities = value_hint_plan.get("question_entities", [])
+        if question_entities:
+            schema_lines.append("【问题实体】")
+            schema_lines.append(f"- {', '.join(question_entities)}")
+
+        entity_matches = value_hint_plan.get("entity_matches", [])
+        if entity_matches:
+            schema_lines.append("【实体值匹配】")
+            for match in entity_matches:
+                values = json.dumps(match["values"], ensure_ascii=False)
+                schema_lines.append(
+                    f"- {match['question_value']} -> {match['table']}.{match['column']} "
+                    f"({match['match_type']}): {values}"
+                )
+
+        sampled_values = value_hint_plan.get("sampled_values", [])
+        if sampled_values:
+            schema_lines.append("【候选值样例】")
+            for sample in sampled_values:
+                values = json.dumps(sample["values"], ensure_ascii=False)
+                schema_lines.append(f"- {sample['table']}.{sample['column']}: {values}")
+
     return "\n".join(schema_lines)
 
 
@@ -429,6 +961,10 @@ class SchemaRetriever:
         min_table_score: float = 1.0,
         auto_mode_threshold: float = 3.0,
         path_hint_mode: str = "off",
+        enable_value_hints: bool = True,
+        value_hint_max_columns: int = 10,
+        value_hint_max_columns_per_table: int = 4,
+        value_hint_max_samples: int = 5,
     ):
         self.max_seed_tables = max_seed_tables
         self.max_return_tables = max_return_tables
@@ -436,8 +972,14 @@ class SchemaRetriever:
         self.min_table_score = min_table_score
         self.auto_mode_threshold = auto_mode_threshold
         self.path_hint_mode = path_hint_mode
+        self.value_sketcher = SQLiteValueSketcher(
+            enabled=enable_value_hints,
+            max_candidate_columns=value_hint_max_columns,
+            max_columns_per_table=value_hint_max_columns_per_table,
+            max_samples_per_column=value_hint_max_samples,
+        )
 
-    def retrieve(self, question: str, schema_meta: dict, mode: str = "rag") -> dict:
+    def retrieve(self, question: str, schema_meta: dict, mode: str = "rag", db_path: str | None = None) -> dict:
         scores = self._score_tables(question, schema_meta)
         ranked_tables = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
         seed_tables = [
@@ -476,11 +1018,19 @@ class SchemaRetriever:
             path_hint_mode=self.path_hint_mode,
             schema_meta=schema_meta,
         )
+        value_hint_plan = self.value_sketcher.build_plan(
+            question=question,
+            schema_meta=schema_meta,
+            selected_tables=selected_tables,
+            seed_tables=seed_tables,
+            db_path=db_path,
+        )
         schema_text = render_schema_v6(
             schema_meta,
             selected_tables=selected_tables,
             seed_tables=seed_tables,
             path_hint_plan=path_hint_plan,
+            value_hint_plan=value_hint_plan,
         )
         return {
             "schema_text": schema_text,
@@ -500,6 +1050,11 @@ class SchemaRetriever:
             "path_hint_foreign_keys": path_hint_plan["foreign_keys"],
             "path_hint_join_paths": path_hint_plan["join_paths"],
             "path_hint_primary_join_path": path_hint_plan["primary_join_path"],
+            "value_hints_enabled": value_hint_plan["enabled"],
+            "value_hint_question_entities": value_hint_plan["question_entities"],
+            "value_hint_entity_matches": value_hint_plan["entity_matches"],
+            "value_hint_sampled_values": value_hint_plan["sampled_values"],
+            "value_hint_candidate_columns": value_hint_plan["candidate_columns"],
             "table_scores": [
                 {"table": table_name, "score": round(score, 3)}
                 for table_name, score in ranked_tables

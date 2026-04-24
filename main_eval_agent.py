@@ -94,6 +94,10 @@ def parse_args():
     parser.add_argument("--retrieval-auto-threshold", type=float, default=3.0, help="auto 模式下触发子图检索的最低置信阈值")
     parser.add_argument("--schema-path-hints", action="store_true", help="是否在检索后的 schema 中附加候选连接关系与连接路径提示")
     parser.add_argument("--schema-path-hints-selective", action="store_true", help="是否只在高结构风险题上选择性注入主路径提示")
+    parser.add_argument("--disable-value-hints", action="store_true", help="disable schema value hints built from live DB values")
+    parser.add_argument("--value-hint-max-columns", type=int, default=10, help="max candidate columns for schema value hints")
+    parser.add_argument("--value-hint-max-columns-per-table", type=int, default=4, help="max candidate columns per table for schema value hints")
+    parser.add_argument("--value-hint-max-samples", type=int, default=5, help="max preview values per hinted column")
     parser.add_argument("--progress-every", type=int, default=50, help="每多少题打印一次进度")
     parser.add_argument("--resume", action="store_true", help="从已有输出继续跑")
     parser.add_argument("--start-index", type=int, default=0, help="从第几题开始跑（0-based）")
@@ -117,10 +121,6 @@ def run_evaluation():
 
     print(">>> 正在加载 Spider 配置与题目集...")
     schema_meta_dict = build_schema_metadata_dict(tables_path)
-    full_schema_dict = {
-        db_id: render_schema_v6(schema_meta)
-        for db_id, schema_meta in schema_meta_dict.items()
-    }
     if args.schema_path_hints_selective:
         path_hint_mode = "selective"
     elif args.schema_path_hints:
@@ -135,6 +135,10 @@ def run_evaluation():
         min_table_score=args.retrieval_min_table_score,
         auto_mode_threshold=args.retrieval_auto_threshold,
         path_hint_mode=path_hint_mode,
+        enable_value_hints=not args.disable_value_hints,
+        value_hint_max_columns=args.value_hint_max_columns,
+        value_hint_max_columns_per_table=args.value_hint_max_columns_per_table,
+        value_hint_max_samples=args.value_hint_max_samples,
     )
 
     with dev_path.open("r", encoding="utf-8") as f:
@@ -190,37 +194,15 @@ def run_evaluation():
             schema_meta = schema_meta_dict.get(db_id)
             if schema_meta is None:
                 raise KeyError(f"未找到数据库 {db_id} 的 schema metadata。")
-
-            if args.schema_mode == "full":
-                retrieval_info = {
-                    "schema_text": full_schema_dict[db_id],
-                    "requested_mode": "full",
-                    "applied_mode": "full",
-                    "fallback_reason": None,
-                    "question_tokens": [],
-                    "seed_tables": [],
-                    "selected_tables": list(schema_meta["table_order"]),
-                    "selected_foreign_keys": [],
-                    "join_paths": [],
-                    "path_hint_requested_mode": "off",
-                    "path_hint_applied_mode": "off",
-                    "path_hints_enabled": False,
-                    "path_hint_trigger_reasons": [],
-                    "path_hint_focus_tables": [],
-                    "path_hint_foreign_keys": [],
-                    "path_hint_join_paths": [],
-                    "path_hint_primary_join_path": [],
-                    "table_scores": [],
-                }
-            else:
-                retrieval_info = schema_retriever.retrieve(
-                    question=question,
-                    schema_meta=schema_meta,
-                    mode=args.schema_mode,
-                )
+            db_path = build_db_path(db_root, db_id)
+            retrieval_info = schema_retriever.retrieve(
+                question=question,
+                schema_meta=schema_meta,
+                mode=args.schema_mode,
+                db_path=str(db_path),
+            )
 
             schema = retrieval_info["schema_text"]
-            db_path = build_db_path(db_root, db_id)
 
             fallback_sql = "SELECT 1"
             agent_result = None
@@ -275,6 +257,11 @@ def run_evaluation():
                     "schema_path_hint_foreign_keys": retrieval_info["path_hint_foreign_keys"],
                     "schema_path_hint_join_paths": retrieval_info["path_hint_join_paths"],
                     "schema_path_hint_primary_join_path": retrieval_info["path_hint_primary_join_path"],
+                    "schema_value_hints_enabled": retrieval_info["value_hints_enabled"],
+                    "schema_value_hint_question_entities": retrieval_info["value_hint_question_entities"],
+                    "schema_value_hint_entity_matches": retrieval_info["value_hint_entity_matches"],
+                    "schema_value_hint_sampled_values": retrieval_info["value_hint_sampled_values"],
+                    "schema_value_hint_candidate_columns": retrieval_info["value_hint_candidate_columns"],
                 }
             else:
                 had_reflexion = agent_result.get("attempts", 1) > 1
@@ -319,6 +306,11 @@ def run_evaluation():
                     "schema_path_hint_foreign_keys": retrieval_info["path_hint_foreign_keys"],
                     "schema_path_hint_join_paths": retrieval_info["path_hint_join_paths"],
                     "schema_path_hint_primary_join_path": retrieval_info["path_hint_primary_join_path"],
+                    "schema_value_hints_enabled": retrieval_info["value_hints_enabled"],
+                    "schema_value_hint_question_entities": retrieval_info["value_hint_question_entities"],
+                    "schema_value_hint_entity_matches": retrieval_info["value_hint_entity_matches"],
+                    "schema_value_hint_sampled_values": retrieval_info["value_hint_sampled_values"],
+                    "schema_value_hint_candidate_columns": retrieval_info["value_hint_candidate_columns"],
                 }
                 summary_record["route"] = agent_result.get("route", "generic_llm")
                 if agent_result.get("pattern_result"):
