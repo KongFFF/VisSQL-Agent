@@ -213,7 +213,9 @@ def run_evaluation():
                     schema_info=schema,
                     user_question=question,
                     db_path=str(db_path),
-                    verbose=False
+                    verbose=False,
+                    retrieval_info=retrieval_info,
+                    schema_meta=schema_meta,
                 )
                 final_sql = agent_result.get("final_sql", fallback_sql)
             except Exception as e:
@@ -262,6 +264,8 @@ def run_evaluation():
                     "schema_value_hint_entity_matches": retrieval_info["value_hint_entity_matches"],
                     "schema_value_hint_sampled_values": retrieval_info["value_hint_sampled_values"],
                     "schema_value_hint_candidate_columns": retrieval_info["value_hint_candidate_columns"],
+                    "semantic_retry_count": 0,
+                    "final_verifier_result": None,
                 }
             else:
                 had_reflexion = agent_result.get("attempts", 1) > 1
@@ -311,6 +315,8 @@ def run_evaluation():
                     "schema_value_hint_entity_matches": retrieval_info["value_hint_entity_matches"],
                     "schema_value_hint_sampled_values": retrieval_info["value_hint_sampled_values"],
                     "schema_value_hint_candidate_columns": retrieval_info["value_hint_candidate_columns"],
+                    "semantic_retry_count": agent_result.get("semantic_retry_count", 0),
+                    "final_verifier_result": make_jsonable(agent_result.get("final_verifier_result")),
                 }
                 summary_record["route"] = agent_result.get("route", "generic_llm")
                 if agent_result.get("pattern_result"):

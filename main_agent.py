@@ -3,6 +3,7 @@ import time
 from agent_coder import CoderNode
 from agent_executor import SQLSandbox
 from agent_memory import WorkingMemory
+from semantic_verifier import SemanticVerifier
 from superlative_solver import SuperlativePatternSolver
 
 class VisSQLAgent:
@@ -37,6 +38,7 @@ class VisSQLAgent:
             router_use_template_threshold=superlative_router_use_threshold,
             router_template_threshold=superlative_router_template_threshold,
         )
+        self.semantic_verifier = SemanticVerifier()
         
         # 3. 设定最大反思重试次数 (防止陷入死循环)
         self.max_retries = max_retries
@@ -46,7 +48,15 @@ class VisSQLAgent:
         self.superlative_router_template_threshold = superlative_router_template_threshold
         print("✅ 系统初始化完成，随时准备接收查询！\n")
 
-    def run_query(self, schema_info: str, user_question: str, db_path: str = None, verbose: bool = True):
+    def run_query(
+        self,
+        schema_info: str,
+        user_question: str,
+        db_path: str = None,
+        verbose: bool = True,
+        retrieval_info: dict | None = None,
+        schema_meta: dict | None = None,
+    ):
         """
         核心状态机（State Machine）：控制流转的生命周期。
         """
@@ -110,6 +120,8 @@ class VisSQLAgent:
         memory.add_initial_query(schema_info, user_question)
         attempt_records = []
         probe_logs = []
+        semantic_retry_count = 0
+        last_verifier_result = None
 
         # ==========================================
         # 🔄 Agent 的灵魂：Reflexion (自我反思) 循环
@@ -139,6 +151,30 @@ class VisSQLAgent:
                 log(f"✅ 执行成功！查出 {result['row_count']} 条数据。")
                 log(f"📊 数据抽样: {result['results'][:2]}")
 
+                verifier_result = self.semantic_verifier.verify(
+                    question=user_question,
+                    sql=generated_sql,
+                    retrieval_info=retrieval_info,
+                    schema_meta=schema_meta,
+                )
+                last_verifier_result = verifier_result
+                attempt_record["semantic_verifier"] = verifier_result
+                high_risk_flags = [
+                    flag for flag in verifier_result.get("risk_flags", [])
+                    if flag.get("severity") == "high"
+                ]
+                if high_risk_flags:
+                    log("语义校验器发现高风险 SQL，准备进行定点修复重写...")
+                    for flag in high_risk_flags:
+                        log(f"  - {flag['type']}: {flag['message']}")
+
+                if verifier_result.get("should_retry", False) and high_risk_flags and attempt < self.max_retries:
+                    semantic_retry_count += 1
+                    memory.add_semantic_feedback(verifier_result)
+                    attempt_record["feedback_type"] = "SemanticVerifier"
+                    attempt_records.append(attempt_record)
+                    continue
+
                 if result["row_count"] > 0 or not self.retry_on_empty_result:
                     attempt_records.append(attempt_record)
                     return {
@@ -152,7 +188,9 @@ class VisSQLAgent:
                         "had_probe": bool(probe_logs),
                         "db_path": self.sandbox.db_path,
                         "route": "generic_llm",
-                        "pattern_result": pattern_result
+                        "pattern_result": pattern_result,
+                        "semantic_retry_count": semantic_retry_count,
+                        "final_verifier_result": last_verifier_result
                     }
 
                 if attempt < self.max_retries:
@@ -190,7 +228,9 @@ class VisSQLAgent:
                         "had_probe": bool(probe_logs),
                         "db_path": self.sandbox.db_path,
                         "route": "generic_llm",
-                        "pattern_result": pattern_result
+                        "pattern_result": pattern_result,
+                        "semantic_retry_count": semantic_retry_count,
+                        "final_verifier_result": last_verifier_result
                     }
                 
             elif result["status"] == "error":
@@ -215,7 +255,9 @@ class VisSQLAgent:
                         "had_probe": bool(probe_logs),
                         "db_path": self.sandbox.db_path,
                         "route": "generic_llm",
-                        "pattern_result": pattern_result
+                        "pattern_result": pattern_result,
+                        "semantic_retry_count": semantic_retry_count,
+                        "final_verifier_result": last_verifier_result
                     }
 
             attempt_records.append(attempt_record)
