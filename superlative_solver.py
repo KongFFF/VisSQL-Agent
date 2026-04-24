@@ -124,6 +124,7 @@ NUMBER_WORDS = {
 TEMPLATE_ORDER = [
     "ORDER_BY",
     "NESTED",
+    "COUNT_FAMILY_TOP1",
     "GROUP_COUNT_TOP1",
     "ENTITY_BY_RELATED_COUNT_TOP1",
     "JOIN_GROUP_COUNT_TOP1",
@@ -131,6 +132,7 @@ TEMPLATE_ORDER = [
 ]
 
 COUNT_FAMILY_TEMPLATES = {
+    "COUNT_FAMILY_TOP1",
     "GROUP_COUNT_TOP1",
     "ENTITY_BY_RELATED_COUNT_TOP1",
     "JOIN_GROUP_COUNT_TOP1",
@@ -139,6 +141,7 @@ COUNT_FAMILY_TEMPLATES = {
 TEMPLATE_DESCRIPTIONS = {
     "ORDER_BY": "Single-table top-1 object retrieval via ORDER BY ... LIMIT 1.",
     "NESTED": "Single-table extrema object retrieval via nested MIN/MAX comparison.",
+    "COUNT_FAMILY_TOP1": "Unified top-1 count planner over same-table grouping or single-hop related-row counting.",
     "GROUP_COUNT_TOP1": "Top-1 group by count via GROUP BY ... ORDER BY COUNT(*) ... LIMIT 1.",
     "ENTITY_BY_RELATED_COUNT_TOP1": "Top-1 entity or entity attribute by counting related fact rows over an enumerated FK plan.",
     "JOIN_GROUP_COUNT_TOP1": "Top-1 entity by related row count via JOIN + GROUP BY + COUNT(*) + ORDER BY + LIMIT 1.",
@@ -536,6 +539,31 @@ class SQLiteSchemaGraph:
             return []
         return [f"{table['name']}.{column_name}" for column_name in table["columns"].values()]
 
+    def same_table_count_plans(self, focus_tables=None):
+        canonical_focus = {
+            self.canonical_table_name(table_name)
+            for table_name in (focus_tables or [])
+            if self.canonical_table_name(table_name)
+        }
+        plans = []
+        for table_key in sorted(self.tables):
+            if canonical_focus and table_key not in canonical_focus:
+                continue
+            table = self.tables[table_key]
+            plans.append(
+                {
+                    "plan_id": f"S{len(plans)}",
+                    "plan_kind": "same_table",
+                    "answer_table": table["name"],
+                    "count_table": table["name"],
+                    "join_on": "",
+                    "default_group_by": "",
+                    "answer_columns": self.table_columns(table["name"]),
+                    "count_columns": self.table_columns(table["name"]),
+                }
+            )
+        return plans
+
     def entity_related_count_plans(self):
         plans = []
         seen = set()
@@ -571,6 +599,46 @@ class SQLiteSchemaGraph:
                 }
             )
         return plans
+
+    def count_family_top1_plans(self, focus_tables=None):
+        canonical_focus = {
+            self.canonical_table_name(table_name)
+            for table_name in (focus_tables or [])
+            if self.canonical_table_name(table_name)
+        }
+        plans = []
+        plans.extend(self.same_table_count_plans(focus_tables=canonical_focus or None))
+
+        related_plans = self.entity_related_count_plans()
+        if canonical_focus:
+            related_plans = [
+                plan
+                for plan in related_plans
+                if self.canonical_table_name(plan["entity_table"]) in canonical_focus
+                or self.canonical_table_name(plan["fact_table"]) in canonical_focus
+            ]
+
+        next_index = len(plans)
+        for offset, plan in enumerate(related_plans):
+            plans.append(
+                {
+                    "plan_id": f"R{next_index + offset}",
+                    "plan_kind": "related_entity",
+                    "answer_table": plan["entity_table"],
+                    "count_table": plan["fact_table"],
+                    "join_on": plan["join_on"],
+                    "default_group_by": plan["entity_key"],
+                    "answer_columns": list(plan["entity_columns"]),
+                    "count_columns": list(plan["fact_columns"]),
+                    "entity_key": plan["entity_key"],
+                    "fact_fk": plan["fact_fk"],
+                }
+            )
+
+        if plans or not canonical_focus:
+            return plans
+
+        return self.count_family_top1_plans(focus_tables=None)
 
 
 class SuperlativePatternSolver:
@@ -675,7 +743,13 @@ class SuperlativePatternSolver:
                 "router_decision": router_decision,
             }
 
-        slot = self._extract_slots(schema_info, question, template, schema=schema)
+        slot = self._extract_slots(
+            schema_info,
+            question,
+            template,
+            schema=schema,
+            slot_hint=slot_hint,
+        )
         if not slot:
             return {
                 "matched": True,
@@ -830,7 +904,14 @@ Rules:
             "needs_nested": _coerce_bool(data.get("needs_nested")),
         }
 
-    def _extract_slots(self, schema_info, question, template, schema=None):
+    def _extract_slots(self, schema_info, question, template, schema=None, slot_hint=None):
+        if template == "COUNT_FAMILY_TOP1":
+            return self._extract_count_family_top1_slot(
+                schema_info,
+                question,
+                schema,
+                slot_hint=slot_hint,
+            )
         if template == "ENTITY_BY_RELATED_COUNT_TOP1":
             return self._extract_entity_related_count_slot(schema_info, question, schema)
 
@@ -939,6 +1020,153 @@ Rules:
             "condition": _normalize_condition(data.get("condition")),
             "include_count": include_count,
         }
+        return slot
+
+    def _focus_tables_from_slot_hint(self, slot_hint, schema):
+        if not slot_hint or schema is None:
+            return []
+
+        focus_tables = []
+        for key in ("target_table", "measure_table"):
+            table_name = schema.canonical_table_name(slot_hint.get(key))
+            if table_name and table_name not in focus_tables:
+                focus_tables.append(table_name)
+        return focus_tables
+
+    def _extract_count_family_top1_slot(self, schema_info, question, schema, slot_hint=None):
+        if schema is None:
+            return None
+
+        focus_tables = self._focus_tables_from_slot_hint(slot_hint, schema)
+        plans = schema.count_family_top1_plans(focus_tables=focus_tables)
+        if not plans:
+            return None
+
+        plan_lines = []
+        for plan in plans:
+            plan_lines.append(
+                "\n".join(
+                    [
+                        f"- plan_id: {plan['plan_id']}",
+                        f"  plan_kind: {plan['plan_kind']}",
+                        f"  answer_table: {plan['answer_table']}",
+                        f"  count_table: {plan['count_table']}",
+                        f"  join_on: {plan.get('join_on', '') or '(none)'}",
+                        f"  default_group_by: {plan.get('default_group_by', '') or '(choose from answer_columns)'}",
+                        f"  answer_columns: {', '.join(plan['answer_columns'])}",
+                        f"  count_columns: {', '.join(plan['count_columns'])}",
+                    ]
+                )
+            )
+
+        slot_hint_json = json.dumps(slot_hint or {}, ensure_ascii=False)
+        prompt = f"""Schema:
+{schema_info}
+
+Question:
+{question}
+
+Slot hint:
+{slot_hint_json}
+
+Enumerated count-family plans:
+{chr(10).join(plan_lines)}
+
+Return JSON with this exact format:
+{{
+  "plan_id": "",
+  "target_columns": [],
+  "group_by_column": "",
+  "order": "ASC or DESC",
+  "condition": "",
+  "include_count": false
+}}
+
+Rules:
+- Choose exactly one plan_id from Enumerated count-family plans.
+- target_columns must come only from the chosen plan's answer_columns. Add COUNT(*) only when the question explicitly asks to output the count/number itself.
+- group_by_column must come from the chosen plan's answer_columns.
+- For same_table plans, prefer them when the desired answer value already exists directly in the counted table, such as year, airline, hometown, city, country, language, or code.
+- For related_entity plans, use them when the answer should come from an entity table that is related to counted rows.
+- For related_entity plans, prefer default_group_by when the answer is an entity row; use an answer-side attribute only when the question explicitly asks for an attribute group such as city, country, language, continent, or grade.
+- order is DESC for most/highest/largest/greatest and ASC for fewest/least/lowest/smallest.
+- condition may reference columns from the chosen answer/count plan. Keep it empty when no WHERE clause is needed.
+- Do not change the counting semantics into SUM or direct ORDER BY on a measure column. This planner is only for top-1 by COUNT(*).
+- Do not output SQL.
+- Output JSON only.
+"""
+        raw = self.coder.generate_response(
+            [{"role": "user", "content": prompt}],
+            system_prompt=self.SLOT_SYSTEM_PROMPT,
+            max_new_tokens=420,
+        )
+        data = _parse_json_like(raw)
+        if not isinstance(data, dict):
+            return None
+
+        plan_id = _clean_optional_text(data.get("plan_id"))
+        plan = next((item for item in plans if item["plan_id"].lower() == plan_id.lower()), None)
+        if not plan:
+            return None
+
+        allowed_targets = {column.lower(): column for column in plan["answer_columns"]}
+        target_columns = []
+        include_count = _coerce_bool(data.get("include_count"))
+        for value in _clean_string_list(data.get("target_columns")):
+            if value.upper() == "COUNT(*)":
+                target_columns.append("COUNT(*)")
+                continue
+            canonical = allowed_targets.get(value.lower())
+            if canonical:
+                target_columns.append(canonical)
+
+        deduped_targets = []
+        seen_targets = set()
+        for value in target_columns:
+            key = value.upper() if value.upper() == "COUNT(*)" else value.lower()
+            if key in seen_targets:
+                continue
+            seen_targets.add(key)
+            deduped_targets.append(value)
+        target_columns = deduped_targets
+
+        if include_count and "COUNT(*)" not in {value.upper() for value in target_columns}:
+            target_columns.append("COUNT(*)")
+
+        group_by_column = _clean_optional_text(data.get("group_by_column"))
+        if group_by_column:
+            group_by_column = allowed_targets.get(group_by_column.lower(), "")
+        if not group_by_column:
+            group_by_column = plan.get("default_group_by", "")
+
+        if not target_columns or not group_by_column:
+            return None
+
+        slot = {
+            "plan_id": plan["plan_id"],
+            "plan_kind": plan["plan_kind"],
+            "answer_table": plan["answer_table"],
+            "count_table": plan["count_table"],
+            "join_on": plan.get("join_on", ""),
+            "default_group_by": plan.get("default_group_by", ""),
+            "target_columns": target_columns,
+            "target": ", ".join(target_columns),
+            "group_by_column": group_by_column,
+            "order": _clean_optional_text(data.get("order")) or "DESC",
+            "condition": _normalize_condition(data.get("condition")),
+            "include_count": include_count,
+        }
+
+        if plan["plan_kind"] == "same_table":
+            slot["table"] = plan["answer_table"]
+            slot["group_key"] = group_by_column
+        else:
+            slot["entity_table"] = plan["answer_table"]
+            slot["fact_table"] = plan["count_table"]
+            slot["entity_key"] = plan.get("entity_key", "")
+            slot["fact_fk"] = plan.get("fact_fk", "")
+            slot["group_key"] = group_by_column
+
         return slot
 
     def _select_count_family_projection(self, schema_info, question, template, slot, schema):
@@ -1188,7 +1416,7 @@ Structural signals:
 Return JSON with this format:
 {{
   "use_template_score": 0.0,
-  "selected_template": "ORDER_BY | NESTED | GROUP_COUNT_TOP1 | ENTITY_BY_RELATED_COUNT_TOP1 | JOIN_GROUP_COUNT_TOP1 | JOIN_ORDER_BY | FALLBACK",
+  "selected_template": "ORDER_BY | NESTED | COUNT_FAMILY_TOP1 | GROUP_COUNT_TOP1 | ENTITY_BY_RELATED_COUNT_TOP1 | JOIN_GROUP_COUNT_TOP1 | JOIN_ORDER_BY | FALLBACK",
   "template_scores": {{
     {all_template_scores}
   }},
@@ -1201,6 +1429,7 @@ Rules:
 - Prefer precision over recall.
 - If uncertain, return low scores and choose FALLBACK.
 - Base your decision on structural fit, not just lexical overlap.
+- For count-based top-1 questions, prefer COUNT_FAMILY_TOP1 when available because it can choose between same-table grouping and related-entity counting from enumerated schema plans.
 - For entity-by-related-row-count questions, prefer ENTITY_BY_RELATED_COUNT_TOP1 over GROUP_COUNT_TOP1 because its join plan is schema-enumerated.
 - Output JSON only.
 """
@@ -1509,12 +1738,12 @@ def projection_is_complete(question, slot):
 
 def uses_phase0_exclusion_layer(mode):
     mode = (mode or "v1").lower()
-    return mode in {"phase0", "v2", "phase1", "phase1_c", "phase1_d", "phase1_e"}
+    return mode in {"phase0", "v2", "phase1", "phase1_c", "phase1_d", "phase1_e", "phase2_a"}
 
 
 def uses_phase1_router(mode):
     mode = (mode or "").lower()
-    return mode in {"phase1", "phase1_c", "phase1_d", "phase1_e"}
+    return mode in {"phase1", "phase1_c", "phase1_d", "phase1_e", "phase2_a"}
 
 
 def uses_controlled_slot_filling(mode):
@@ -1532,9 +1761,14 @@ def uses_structured_projection_selector(mode):
     return mode == "phase1_e"
 
 
+def uses_unified_count_planner(mode):
+    mode = (mode or "").lower()
+    return mode == "phase2_a"
+
+
 def uses_projection_validator(mode):
     mode = (mode or "").lower()
-    return mode in {"phase1_d", "phase1_e"}
+    return mode in {"phase1_d", "phase1_e", "phase2_a"}
 
 
 def get_superlative_exclusion_reason(question, mode="v1"):
@@ -1569,14 +1803,18 @@ def get_candidate_templates(question, slot_hint, schema, mode="phase1"):
     q = question.lower()
     candidates = []
 
-    if uses_entity_count_plan_mode(mode) and is_join_group_count_superlative(question, slot_hint, schema):
+    if uses_unified_count_planner(mode) and is_group_count_superlative(q, slot_hint):
+        candidates.append("COUNT_FAMILY_TOP1")
+
+    elif uses_entity_count_plan_mode(mode) and is_join_group_count_superlative(question, slot_hint, schema):
         candidates.append("ENTITY_BY_RELATED_COUNT_TOP1")
 
-    if is_join_group_count_superlative(question, slot_hint, schema):
-        candidates.append("JOIN_GROUP_COUNT_TOP1")
+    if not uses_unified_count_planner(mode):
+        if is_join_group_count_superlative(question, slot_hint, schema):
+            candidates.append("JOIN_GROUP_COUNT_TOP1")
 
-    if is_group_count_superlative(q, slot_hint):
-        candidates.append("GROUP_COUNT_TOP1")
+        if is_group_count_superlative(q, slot_hint):
+            candidates.append("GROUP_COUNT_TOP1")
 
     if is_single_hop_join_superlative(slot_hint, schema):
         candidates.append("JOIN_ORDER_BY")
@@ -1638,6 +1876,9 @@ def choose_template(question, slot_hint, schema, mode="v1"):
     if get_superlative_exclusion_reason(q, mode=mode):
         return "FALLBACK"
 
+    if uses_unified_count_planner(mode) and is_group_count_superlative(q, slot_hint):
+        return "COUNT_FAMILY_TOP1"
+
     if is_join_group_count_superlative(question, slot_hint, schema):
         return "JOIN_GROUP_COUNT_TOP1"
 
@@ -1658,6 +1899,8 @@ def build_sql(template, slot):
         return build_sql_order(slot)
     if template == "NESTED":
         return build_sql_nested(slot)
+    if template == "COUNT_FAMILY_TOP1":
+        return build_sql_count_family_top1(slot)
     if template == "GROUP_COUNT_TOP1":
         return build_sql_group_count(slot)
     if template == "ENTITY_BY_RELATED_COUNT_TOP1":
@@ -1704,6 +1947,41 @@ def build_sql_nested(slot):
         sql += f" WHERE {condition}"
     sql += ")"
     return sql
+
+
+def build_sql_count_family_top1(slot):
+    plan_kind = _clean_optional_text(slot.get("plan_kind"))
+    target = _clean_optional_text(slot.get("target"))
+    group_by_column = _clean_optional_text(slot.get("group_by_column")) or _clean_optional_text(slot.get("group_key"))
+    order = _clean_optional_text(slot.get("order")) or "DESC"
+    condition = _normalize_condition(slot.get("condition"))
+
+    if not plan_kind or not target or not group_by_column:
+        return ""
+
+    if plan_kind == "same_table":
+        table = _clean_optional_text(slot.get("table")) or _clean_optional_text(slot.get("answer_table"))
+        if not table:
+            return ""
+        sql = f"SELECT {target} FROM {table}"
+        if condition:
+            sql += f" WHERE {condition}"
+        sql += f" GROUP BY {group_by_column} ORDER BY COUNT(*) {order} LIMIT 1"
+        return sql
+
+    if plan_kind == "related_entity":
+        answer_table = _clean_optional_text(slot.get("answer_table")) or _clean_optional_text(slot.get("entity_table"))
+        count_table = _clean_optional_text(slot.get("count_table")) or _clean_optional_text(slot.get("fact_table"))
+        join_on = _clean_optional_text(slot.get("join_on"))
+        if not answer_table or not count_table or not join_on:
+            return ""
+        sql = f"SELECT {target} FROM {answer_table} JOIN {count_table} ON {join_on}"
+        if condition:
+            sql += f" WHERE {condition}"
+        sql += f" GROUP BY {group_by_column} ORDER BY COUNT(*) {order} LIMIT 1"
+        return sql
+
+    return ""
 
 
 def build_sql_group_count(slot):
@@ -1867,6 +2145,76 @@ def validate(slot, schema):
         default_table,
     )
     return schema.column_exists(measure_table, measure_column)
+
+
+def validate_count_family_top1(slot, schema):
+    plan_kind = _clean_optional_text(slot.get("plan_kind"))
+    group_by_column = _clean_optional_text(slot.get("group_by_column")) or _clean_optional_text(slot.get("group_key"))
+
+    if plan_kind == "same_table":
+        table_expr = _clean_optional_text(slot.get("table")) or _clean_optional_text(slot.get("answer_table"))
+        if not schema.table_exists(table_expr):
+            return False
+
+        alias_map, default_table = schema.extract_alias_map([table_expr])
+        if not _validate_projection(slot.get("target", ""), alias_map, default_table, schema):
+            return False
+
+        group_table, group_column = schema.resolve_identifier(
+            group_by_column,
+            alias_map,
+            default_table,
+        )
+        if not schema.column_exists(group_table, group_column):
+            return False
+
+        projection_tables = _collect_projection_tables(slot.get("target", ""), alias_map, default_table, schema)
+        if not projection_tables:
+            return False
+        if any(table_name != group_table for table_name in projection_tables):
+            return False
+        return True
+
+    if plan_kind == "related_entity":
+        answer_table = _clean_optional_text(slot.get("answer_table")) or _clean_optional_text(slot.get("entity_table"))
+        count_table = _clean_optional_text(slot.get("count_table")) or _clean_optional_text(slot.get("fact_table"))
+        if not schema.table_exists(answer_table) or not schema.table_exists(count_table):
+            return False
+
+        answer_base = schema.canonical_table_name(answer_table)
+        count_base = schema.canonical_table_name(count_table)
+        if not answer_base or not count_base or answer_base == count_base:
+            return False
+
+        if not schema.has_direct_fk_path(answer_table, count_table):
+            return False
+
+        alias_map, _ = schema.extract_alias_map([answer_table, count_table])
+        if not _validate_projection(slot.get("target", ""), alias_map, None, schema):
+            return False
+
+        projection_tables = _collect_projection_tables(slot.get("target", ""), alias_map, None, schema)
+        if not projection_tables or any(table_name != answer_base for table_name in projection_tables):
+            return False
+
+        group_table, group_column = schema.resolve_identifier(
+            group_by_column,
+            alias_map,
+            None,
+        )
+        if not schema.column_exists(group_table, group_column):
+            return False
+        if group_table != answer_base:
+            return False
+
+        return _validate_join_predicate(
+            slot.get("join_on", ""),
+            alias_map,
+            schema,
+            required_tables={answer_base, count_base},
+        )
+
+    return False
 
 
 def validate_group_count(slot, schema):
@@ -2034,6 +2382,8 @@ def validate_single_hop_join(slot, schema):
 def validate_by_template(template, slot, schema):
     if template in {"ORDER_BY", "NESTED"}:
         return validate(slot, schema)
+    if template == "COUNT_FAMILY_TOP1":
+        return validate_count_family_top1(slot, schema)
     if template == "GROUP_COUNT_TOP1":
         return validate_group_count(slot, schema)
     if template == "ENTITY_BY_RELATED_COUNT_TOP1":
