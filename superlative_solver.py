@@ -297,6 +297,36 @@ def _projection_count(expr):
     return len(_split_csv(_clean_optional_text(expr)))
 
 
+COUNT_OUTPUT_CUES = [
+    "and how many",
+    "and number of",
+    "and the number of",
+    "and the numbers of",
+    "how many channels use it",
+    "how many does it have",
+    "how many does they have",
+    "number of tv channel it has",
+    "number of tv channels it has",
+]
+
+ATTRIBUTE_GROUP_TOKENS = {
+    "year",
+    "city",
+    "country",
+    "language",
+    "continent",
+    "grade",
+    "hometown",
+    "nationality",
+    "citizenship",
+    "airline",
+    "code",
+    "type",
+    "model",
+    "name",
+}
+
+
 def expected_projection_count(question):
     q = question.lower()
     prefix = q
@@ -1033,14 +1063,72 @@ Rules:
                 focus_tables.append(table_name)
         return focus_tables
 
-    def _extract_count_family_top1_slot(self, schema_info, question, schema, slot_hint=None):
-        if schema is None:
-            return None
-
+    def _count_family_candidate_plans(self, schema, slot_hint):
         focus_tables = self._focus_tables_from_slot_hint(slot_hint, schema)
         plans = schema.count_family_top1_plans(focus_tables=focus_tables)
         if not plans:
+            return []
+
+        if not uses_decomposed_count_slotting(self.mode):
+            return plans
+
+        target_table = schema.canonical_table_name((slot_hint or {}).get("target_table"))
+        measure_table = schema.canonical_table_name((slot_hint or {}).get("measure_table"))
+
+        def plan_matches(plan, answer=None, count=None, kind=None):
+            if kind and plan["plan_kind"] != kind:
+                return False
+            answer_match = not answer or schema.canonical_table_name(plan["answer_table"]) == answer
+            count_match = not count or schema.canonical_table_name(plan["count_table"]) == count
+            return answer_match and count_match
+
+        if target_table and measure_table:
+            if target_table == measure_table:
+                exact_same = [plan for plan in plans if plan_matches(plan, answer=target_table, kind="same_table")]
+                if exact_same:
+                    return exact_same
+            else:
+                exact_related = [
+                    plan
+                    for plan in plans
+                    if plan_matches(plan, answer=target_table, count=measure_table, kind="related_entity")
+                ]
+                if exact_related:
+                    return exact_related
+
+                answer_related = [
+                    plan
+                    for plan in plans
+                    if plan_matches(plan, answer=target_table, kind="related_entity")
+                ]
+                if answer_related:
+                    return answer_related
+
+        if target_table:
+            exact_target_same = [plan for plan in plans if plan_matches(plan, answer=target_table, kind="same_table")]
+            if exact_target_same:
+                return exact_target_same
+
+            target_answer = [plan for plan in plans if plan_matches(plan, answer=target_table)]
+            if target_answer:
+                return target_answer
+
+        if measure_table:
+            measure_count = [plan for plan in plans if plan_matches(plan, count=measure_table, kind="related_entity")]
+            if measure_count:
+                return measure_count
+
+            measure_same = [plan for plan in plans if plan_matches(plan, answer=measure_table, kind="same_table")]
+            if measure_same:
+                return measure_same
+
+        return plans
+
+    def _select_count_family_plan(self, question, plans, slot_hint=None):
+        if not plans:
             return None
+        if len(plans) == 1:
+            return plans[0]
 
         plan_lines = []
         for plan in plans:
@@ -1052,74 +1140,191 @@ Rules:
                         f"  answer_table: {plan['answer_table']}",
                         f"  count_table: {plan['count_table']}",
                         f"  join_on: {plan.get('join_on', '') or '(none)'}",
-                        f"  default_group_by: {plan.get('default_group_by', '') or '(choose from answer_columns)'}",
-                        f"  answer_columns: {', '.join(plan['answer_columns'])}",
-                        f"  count_columns: {', '.join(plan['count_columns'])}",
+                        f"  default_group_by: {plan.get('default_group_by', '') or '(none)'}",
                     ]
                 )
             )
 
-        slot_hint_json = json.dumps(slot_hint or {}, ensure_ascii=False)
-        prompt = f"""Schema:
-{schema_info}
-
-Question:
+        prompt = f"""Question:
 {question}
 
 Slot hint:
-{slot_hint_json}
+{json.dumps(slot_hint or {}, ensure_ascii=False)}
 
-Enumerated count-family plans:
+Candidate count-family plans:
 {chr(10).join(plan_lines)}
 
 Return JSON with this exact format:
 {{
-  "plan_id": "",
-  "target_columns": [],
-  "group_by_column": "",
-  "order": "ASC or DESC",
-  "condition": "",
-  "include_count": false
+  "plan_id": ""
 }}
 
 Rules:
-- Choose exactly one plan_id from Enumerated count-family plans.
-- target_columns must come only from the chosen plan's answer_columns. Add COUNT(*) only when the question explicitly asks to output the count/number itself.
-- group_by_column must come from the chosen plan's answer_columns.
-- For same_table plans, prefer them when the desired answer value already exists directly in the counted table, such as year, airline, hometown, city, country, language, or code.
-- For related_entity plans, use them when the answer should come from an entity table that is related to counted rows.
-- For related_entity plans, prefer default_group_by when the answer is an entity row; use an answer-side attribute only when the question explicitly asks for an attribute group such as city, country, language, continent, or grade.
-- order is DESC for most/highest/largest/greatest and ASC for fewest/least/lowest/smallest.
-- condition may reference columns from the chosen answer/count plan. Keep it empty when no WHERE clause is needed.
-- Do not change the counting semantics into SUM or direct ORDER BY on a measure column. This planner is only for top-1 by COUNT(*).
-- Do not output SQL.
+- Choose exactly one plan_id from Candidate count-family plans.
+- Prefer same_table when the answer is already a grouped value inside one table, such as year, hometown, nationality, citizenship, language, country, city, code, airline, or type.
+- Prefer related_entity when the answer belongs to an entity table and counted rows come from another table.
 - Output JSON only.
 """
         raw = self.coder.generate_response(
             [{"role": "user", "content": prompt}],
             system_prompt=self.SLOT_SYSTEM_PROMPT,
-            max_new_tokens=420,
+            max_new_tokens=120,
         )
-        data = _parse_json_like(raw)
-        if not isinstance(data, dict):
+        data = _parse_json_like(raw) or {}
+        plan_id = _clean_optional_text(data.get("plan_id"))
+        return next((item for item in plans if item["plan_id"].lower() == plan_id.lower()), None)
+
+    def _extract_count_family_target_columns(self, question, plan):
+        expected_count = expected_projection_count(question)
+        candidates = list(plan["answer_columns"])
+        if not candidates:
+            return []
+
+        prompt = f"""Question:
+{question}
+
+Chosen count-family plan:
+- plan_kind: {plan['plan_kind']}
+- answer_table: {plan['answer_table']}
+- count_table: {plan['count_table']}
+
+Available answer-side columns:
+{chr(10).join(f"- {column}" for column in candidates)}
+
+Return JSON with this exact format:
+{{
+  "target_columns": []
+}}
+
+Rules:
+- Choose target_columns only from Available answer-side columns.
+- Include every answer-side column explicitly requested by the question.
+- The question appears to require at least {expected_count} output column(s).
+- Do not include COUNT(*) here. It is handled separately.
+- Output JSON only.
+"""
+        raw = self.coder.generate_response(
+            [{"role": "user", "content": prompt}],
+            system_prompt=self.SLOT_SYSTEM_PROMPT,
+            max_new_tokens=180,
+        )
+        data = _parse_json_like(raw) or {}
+        allowed = {column.lower(): column for column in candidates}
+        selected = []
+        for value in _clean_string_list(data.get("target_columns")):
+            canonical = allowed.get(value.lower())
+            if canonical and canonical.lower() not in {item.lower() for item in selected}:
+                selected.append(canonical)
+        if selected:
+            return selected
+        return self._lexical_target_columns(question, candidates, expected_count)
+
+    def _lexical_target_columns(self, question, candidates, expected_count):
+        question_tokens = set(normalize_identifier_tokens(question))
+        if not question_tokens:
+            return []
+
+        scored = []
+        for column in candidates:
+            table_name, column_name = column.split(".", 1)
+            del table_name
+            tokens = set(normalize_identifier_tokens(column_name))
+            score = len(tokens & question_tokens)
+            if score > 0:
+                scored.append((score, len(column_name), column))
+
+        scored.sort(key=lambda item: (-item[0], item[1], item[2].lower()))
+        selected = []
+        for _, _, column in scored:
+            if column.lower() in {item.lower() for item in selected}:
+                continue
+            selected.append(column)
+            if len(selected) >= max(1, expected_count):
+                break
+        return selected
+
+    def _infer_count_family_group_by(self, question, plan, target_columns):
+        non_count_targets = [column for column in target_columns if column.upper() != "COUNT(*)"]
+        if not non_count_targets:
+            return _clean_optional_text(plan.get("default_group_by"))
+
+        if plan["plan_kind"] == "same_table":
+            return non_count_targets[0]
+
+        if len(non_count_targets) == 1 and self._should_group_by_target_attribute(question, non_count_targets[0]):
+            return non_count_targets[0]
+
+        return _clean_optional_text(plan.get("default_group_by")) or non_count_targets[0]
+
+    def _should_group_by_target_attribute(self, question, qualified_column):
+        column_name = qualified_column.split(".", 1)[-1]
+        tokens = set(normalize_identifier_tokens(column_name))
+        question_tokens = set(normalize_identifier_tokens(question))
+        if tokens & ATTRIBUTE_GROUP_TOKENS:
+            return True
+        return bool(tokens & question_tokens & ATTRIBUTE_GROUP_TOKENS)
+
+    def _extract_count_family_condition(self, question, plan):
+        prompt = f"""Question:
+{question}
+
+Chosen count-family plan:
+- plan_kind: {plan['plan_kind']}
+- answer_table: {plan['answer_table']}
+- count_table: {plan['count_table']}
+- join_on: {plan.get('join_on', '') or '(none)'}
+
+Available answer-side columns:
+{chr(10).join(f"- {column}" for column in plan['answer_columns'])}
+
+Available count-side columns:
+{chr(10).join(f"- {column}" for column in plan['count_columns'])}
+
+Return JSON with this exact format:
+{{
+  "condition": ""
+}}
+
+Rules:
+- Return only the WHERE condition content, not the word WHERE.
+- Keep it empty when no filter is needed.
+- Use only columns from the chosen plan.
+- Output JSON only.
+"""
+        raw = self.coder.generate_response(
+            [{"role": "user", "content": prompt}],
+            system_prompt=self.SLOT_SYSTEM_PROMPT,
+            max_new_tokens=120,
+        )
+        data = _parse_json_like(raw) or {}
+        return _normalize_condition(data.get("condition"))
+
+    def _infer_count_family_order(self, question):
+        q = question.lower()
+        asc_tokens = ["fewest", "least", "lowest", "smallest"]
+        return "ASC" if any(token in q for token in asc_tokens) else "DESC"
+
+    def _infer_count_family_include_count(self, question):
+        q = question.lower()
+        return any(cue in q for cue in COUNT_OUTPUT_CUES)
+
+    def _extract_count_family_top1_slot(self, schema_info, question, schema, slot_hint=None):
+        if schema is None:
             return None
 
-        plan_id = _clean_optional_text(data.get("plan_id"))
-        plan = next((item for item in plans if item["plan_id"].lower() == plan_id.lower()), None)
+        plans = self._count_family_candidate_plans(schema, slot_hint)
+        if not plans:
+            return None
+
+        plan = self._select_count_family_plan(question, plans, slot_hint=slot_hint)
         if not plan:
             return None
 
-        allowed_targets = {column.lower(): column for column in plan["answer_columns"]}
-        target_columns = []
-        include_count = _coerce_bool(data.get("include_count"))
-        for value in _clean_string_list(data.get("target_columns")):
-            if value.upper() == "COUNT(*)":
-                target_columns.append("COUNT(*)")
-                continue
-            canonical = allowed_targets.get(value.lower())
-            if canonical:
-                target_columns.append(canonical)
-
+        target_columns = self._extract_count_family_target_columns(question, plan)
+        include_count = self._infer_count_family_include_count(question)
+        if include_count:
+            target_columns.append("COUNT(*)")
+        target_columns = _clean_string_list(target_columns)
         deduped_targets = []
         seen_targets = set()
         for value in target_columns:
@@ -1129,15 +1334,10 @@ Rules:
             seen_targets.add(key)
             deduped_targets.append(value)
         target_columns = deduped_targets
-
-        if include_count and "COUNT(*)" not in {value.upper() for value in target_columns}:
-            target_columns.append("COUNT(*)")
-
-        group_by_column = _clean_optional_text(data.get("group_by_column"))
-        if group_by_column:
-            group_by_column = allowed_targets.get(group_by_column.lower(), "")
-        if not group_by_column:
-            group_by_column = plan.get("default_group_by", "")
+        group_by_column = self._infer_count_family_group_by(question, plan, target_columns)
+        condition = ""
+        if uses_decomposed_count_slotting(self.mode):
+            condition = self._extract_count_family_condition(question, plan)
 
         if not target_columns or not group_by_column:
             return None
@@ -1152,8 +1352,8 @@ Rules:
             "target_columns": target_columns,
             "target": ", ".join(target_columns),
             "group_by_column": group_by_column,
-            "order": _clean_optional_text(data.get("order")) or "DESC",
-            "condition": _normalize_condition(data.get("condition")),
+            "order": self._infer_count_family_order(question),
+            "condition": condition,
             "include_count": include_count,
         }
 
@@ -1738,12 +1938,12 @@ def projection_is_complete(question, slot):
 
 def uses_phase0_exclusion_layer(mode):
     mode = (mode or "v1").lower()
-    return mode in {"phase0", "v2", "phase1", "phase1_c", "phase1_d", "phase1_e", "phase2_a"}
+    return mode in {"phase0", "v2", "phase1", "phase1_c", "phase1_d", "phase1_e", "phase2_a", "phase2_b"}
 
 
 def uses_phase1_router(mode):
     mode = (mode or "").lower()
-    return mode in {"phase1", "phase1_c", "phase1_d", "phase1_e", "phase2_a"}
+    return mode in {"phase1", "phase1_c", "phase1_d", "phase1_e", "phase2_a", "phase2_b"}
 
 
 def uses_controlled_slot_filling(mode):
@@ -1763,12 +1963,22 @@ def uses_structured_projection_selector(mode):
 
 def uses_unified_count_planner(mode):
     mode = (mode or "").lower()
-    return mode == "phase2_a"
+    return mode in {"phase2_a", "phase2_b"}
+
+
+def uses_decomposed_count_slotting(mode):
+    mode = (mode or "").lower()
+    return mode == "phase2_b"
+
+
+def allows_count_output_count_family(mode):
+    mode = (mode or "").lower()
+    return mode == "phase2_b"
 
 
 def uses_projection_validator(mode):
     mode = (mode or "").lower()
-    return mode in {"phase1_d", "phase1_e", "phase2_a"}
+    return mode in {"phase1_d", "phase1_e", "phase2_a", "phase2_b"}
 
 
 def get_superlative_exclusion_reason(question, mode="v1"):
@@ -1781,7 +1991,7 @@ def get_superlative_exclusion_reason(question, mode="v1"):
     if is_topk_superlative_query(question):
         return "topk_superlative_query"
 
-    if is_count_superlative_with_count_output(question):
+    if is_count_superlative_with_count_output(question) and not allows_count_output_count_family(mode):
         return "count_superlative_with_count_output"
 
     if is_temporal_superlative_query(question):
@@ -1793,7 +2003,7 @@ def get_superlative_exclusion_reason(question, mode="v1"):
     if uses_controlled_slot_filling(mode) and is_ordered_list_superlative_query(question):
         return "ordered_list_superlative_query"
 
-    if uses_controlled_slot_filling(mode) and is_per_group_percentage_extrema_query(question):
+    if (uses_controlled_slot_filling(mode) or uses_unified_count_planner(mode)) and is_per_group_percentage_extrema_query(question):
         return "per_group_percentage_extrema_query"
 
     return None
