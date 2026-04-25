@@ -98,6 +98,7 @@ def parse_args():
     parser.add_argument("--value-hint-max-columns", type=int, default=10, help="max candidate columns for schema value hints")
     parser.add_argument("--value-hint-max-columns-per-table", type=int, default=4, help="max candidate columns per table for schema value hints")
     parser.add_argument("--value-hint-max-samples", type=int, default=5, help="max preview values per hinted column")
+    parser.add_argument("--disable-bridge-completion", action="store_true", help="disable explicit bridge-table shortest-path completion while keeping seed-first table retention")
     parser.add_argument("--progress-every", type=int, default=50, help="每多少题打印一次进度")
     parser.add_argument("--resume", action="store_true", help="从已有输出继续跑")
     parser.add_argument("--start-index", type=int, default=0, help="从第几题开始跑（0-based）")
@@ -139,6 +140,7 @@ def run_evaluation():
         value_hint_max_columns=args.value_hint_max_columns,
         value_hint_max_columns_per_table=args.value_hint_max_columns_per_table,
         value_hint_max_samples=args.value_hint_max_samples,
+        enable_bridge_completion=not args.disable_bridge_completion,
     )
 
     with dev_path.open("r", encoding="utf-8") as f:
