@@ -2,7 +2,7 @@ import difflib
 import json
 import re
 import sqlite3
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 
 
@@ -179,6 +179,29 @@ ENTITY_FRIENDLY_COLUMN_NAMES = {
     "maker",
     "model",
     "fullname",
+}
+
+GENERIC_KEYLIKE_COLUMN_NAMES = {
+    "id",
+    "uid",
+    "code",
+    "number",
+    "no",
+}
+
+AMBIGUOUS_COLUMN_PENALTY_NAMES = {
+    "name",
+    "title",
+    "type",
+    "model",
+    "maker",
+    "population",
+    "city",
+    "country",
+    "state",
+    "language",
+    "region",
+    "continent",
 }
 
 QUESTION_ENTITY_STOPWORDS = {
@@ -1170,6 +1193,10 @@ class SchemaRetriever:
         question_entities = extract_question_entities(question)
         has_code_like_entity = any(re.fullmatch(r"[A-Z]{2,5}", value) for value in question_entities)
         aggregation_cues = tokens & AGGREGATION_HINT_KEYWORDS
+        column_name_frequency = Counter()
+        for table in schema_meta["tables"].values():
+            for column in table["columns"]:
+                column_name_frequency[column["name"].lower()] += 1
         ranked = []
 
         for table_name, table in schema_meta["tables"].items():
@@ -1182,6 +1209,9 @@ class SchemaRetriever:
                 overlap = len(tokens & column["tokens"])
                 score = 0.0
                 reasons = []
+                duplicate_count = column_name_frequency[normalized_column_name]
+                is_duplicate_name = duplicate_count > 1
+                is_generic_keylike = self._is_generic_keylike_column(normalized_column_name)
 
                 if overlap:
                     score += overlap * 4.0
@@ -1212,11 +1242,16 @@ class SchemaRetriever:
                     question_entities
                     and table_overlap
                     and normalized_column_name in ENTITY_FRIENDLY_COLUMN_NAMES
+                    and (not is_duplicate_name or full_column_name in normalized_question)
                 ):
                     score += 1.5
                     reasons.append("entity_friendly_column")
 
-                if aggregation_cues and any(keyword in normalized_column_name for keyword in VALUE_HINT_MEASURE_KEYWORDS):
+                if (
+                    aggregation_cues
+                    and any(keyword in normalized_column_name for keyword in VALUE_HINT_MEASURE_KEYWORDS)
+                    and not is_generic_keylike
+                ):
                     score += 1.5
                     reasons.append("aggregation_measure_bonus")
 
@@ -1228,8 +1263,45 @@ class SchemaRetriever:
                     score += 0.5
                     reasons.append("foreign_key_overlap")
 
-                if score < 2.5:
+                if (
+                    is_generic_keylike
+                    and not has_code_like_entity
+                    and full_column_name not in normalized_question
+                    and overlap == 0
+                ):
                     continue
+
+                if (
+                    is_duplicate_name
+                    and full_column_name not in normalized_question
+                    and normalized_column_name in AMBIGUOUS_COLUMN_PENALTY_NAMES
+                ):
+                    score -= min(2.0, 0.8 * (duplicate_count - 1))
+                    reasons.append("duplicate_name_penalty")
+
+                if (
+                    (column["is_primary_key"] or column["foreign_key"] or is_generic_keylike)
+                    and full_column_name not in normalized_question
+                    and not has_code_like_entity
+                    and overlap <= 1
+                ):
+                    score -= 1.5
+                    reasons.append("generic_key_penalty")
+
+                if score < 3.5:
+                    continue
+
+                strong_signal_count = sum(
+                    1
+                    for reason in reasons
+                    if reason in {
+                        "token_overlap",
+                        "full_column_name_match",
+                        "semantic_exact_bonus",
+                        "code_entity_bonus",
+                        "aggregation_measure_bonus",
+                    }
+                )
 
                 table_ranked.append(
                     {
@@ -1237,6 +1309,20 @@ class SchemaRetriever:
                         "column": column_name,
                         "score": round(score, 3),
                         "reasons": reasons,
+                        "is_duplicate_name": is_duplicate_name,
+                        "is_generic_keylike": is_generic_keylike,
+                        "strong_signal_count": strong_signal_count,
+                        "supports_prompt_hint": (
+                            score >= 8.0
+                            and strong_signal_count >= 2
+                            and not is_duplicate_name
+                            and (not is_generic_keylike or has_code_like_entity or full_column_name in normalized_question)
+                        ),
+                        "supports_table_boost": (
+                            score >= 5.5
+                            and strong_signal_count >= 1
+                            and not (is_duplicate_name and full_column_name not in normalized_question)
+                        ),
                     }
                 )
 
@@ -1250,14 +1336,16 @@ class SchemaRetriever:
         column_boosts = {table_name: 0.0 for table_name in lexical_scores}
         hits_by_table = {}
         for item in column_scores:
+            if not item.get("supports_table_boost"):
+                continue
             hits_by_table.setdefault(item["table"], []).append(item)
 
-        weights = (0.65, 0.3, 0.15)
+        weights = (0.3, 0.12)
         for table_name, hits in hits_by_table.items():
             boost = 0.0
             for idx, hit in enumerate(hits[: len(weights)]):
                 boost += hit["score"] * weights[idx]
-            column_boosts[table_name] = min(boost, 4.5)
+            column_boosts[table_name] = min(boost, 2.0)
 
         fused_scores = {
             table_name: lexical_scores.get(table_name, 0.0) + column_boosts.get(table_name, 0.0)
@@ -1274,13 +1362,26 @@ class SchemaRetriever:
                 "score": item["score"],
             }
             for item in column_scores
-            if item["table"] in selected_set
+            if item["table"] in selected_set and item.get("supports_prompt_hint")
         ]
-        filtered = filtered[:6]
+        if len(filtered) >= 2 and filtered[0]["score"] - filtered[1]["score"] < 1.5:
+            filtered = filtered[:1]
+        else:
+            filtered = filtered[:2]
         return {
             "enabled": bool(filtered),
             "columns": filtered,
         }
+
+    def _is_generic_keylike_column(self, normalized_column_name: str) -> bool:
+        if normalized_column_name in GENERIC_KEYLIKE_COLUMN_NAMES:
+            return True
+        return (
+            normalized_column_name.endswith("id")
+            or normalized_column_name.endswith("_id")
+            or normalized_column_name.endswith("code")
+            or normalized_column_name.endswith("_code")
+        )
 
     def _expand_tables(self, seed_tables: list, schema_meta: dict) -> list:
         if not seed_tables:
