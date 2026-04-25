@@ -1038,6 +1038,10 @@ class SchemaRetriever:
         value_hint_max_samples: int = 5,
         column_retrieval_max_hits: int = 12,
         column_retrieval_max_hits_per_table: int = 2,
+        enable_bridge_completion: bool = True,
+        bridge_max_anchor_tables: int = 4,
+        bridge_max_paths: int = 2,
+        bridge_max_path_length: int = 4,
     ):
         self.max_seed_tables = max_seed_tables
         self.max_return_tables = max_return_tables
@@ -1053,6 +1057,10 @@ class SchemaRetriever:
         )
         self.column_retrieval_max_hits = column_retrieval_max_hits
         self.column_retrieval_max_hits_per_table = column_retrieval_max_hits_per_table
+        self.enable_bridge_completion = enable_bridge_completion
+        self.bridge_max_anchor_tables = bridge_max_anchor_tables
+        self.bridge_max_paths = bridge_max_paths
+        self.bridge_max_path_length = bridge_max_path_length
 
     def retrieve(self, question: str, schema_meta: dict, mode: str = "rag", db_path: str | None = None) -> dict:
         lexical_scores = self._score_tables(question, schema_meta)
@@ -1068,7 +1076,6 @@ class SchemaRetriever:
             if score >= self.min_table_score
         ][: self.max_seed_tables]
 
-        selected_tables = self._expand_tables(seed_tables, schema_meta)
         fallback_reason = None
         applied_mode = mode
 
@@ -1076,16 +1083,25 @@ class SchemaRetriever:
             raise ValueError(f"Unsupported schema mode: {mode}")
 
         if mode == "full":
-            selected_tables = list(schema_meta["table_order"])
             seed_tables = []
         elif not seed_tables:
-            selected_tables = list(schema_meta["table_order"])
             applied_mode = "full"
             fallback_reason = "no_seed_table"
         elif mode == "auto" and scores.get(seed_tables[0], 0.0) < self.auto_mode_threshold:
-            selected_tables = list(schema_meta["table_order"])
             applied_mode = "full"
             fallback_reason = "low_confidence"
+
+        bridge_plan = self._build_bridge_completion_plan(
+            seed_tables=seed_tables,
+            ranked_tables=ranked_tables,
+            column_scores=column_scores,
+            schema_meta=schema_meta,
+        )
+
+        if applied_mode == "full":
+            selected_tables = list(schema_meta["table_order"])
+        else:
+            selected_tables = self._expand_tables(seed_tables, schema_meta, bridge_plan=bridge_plan)
 
         all_join_paths = build_join_paths(schema_meta, seed_tables)
         selected_fk_edges = build_selected_fk_edges(schema_meta, selected_tables, seed_tables)
@@ -1127,6 +1143,10 @@ class SchemaRetriever:
             "selected_tables": selected_tables,
             "selected_foreign_keys": selected_fk_edges,
             "join_paths": [" -> ".join(path) for path in all_join_paths],
+            "bridge_completion_enabled": bridge_plan["enabled"],
+            "bridge_anchor_tables": bridge_plan["anchor_tables"],
+            "bridge_paths": bridge_plan["paths"],
+            "bridge_added_tables": bridge_plan["added_tables"],
             "path_hint_requested_mode": path_hint_plan["requested_mode"],
             "path_hint_applied_mode": path_hint_plan["applied_mode"],
             "path_hints_enabled": path_hint_plan["enabled"],
@@ -1383,9 +1403,109 @@ class SchemaRetriever:
             or normalized_column_name.endswith("_code")
         )
 
-    def _expand_tables(self, seed_tables: list, schema_meta: dict) -> list:
+    def _build_bridge_completion_plan(
+        self,
+        seed_tables: list,
+        ranked_tables: list,
+        column_scores: list,
+        schema_meta: dict,
+    ) -> dict:
+        default_plan = {
+            "enabled": False,
+            "anchor_tables": seed_tables,
+            "paths": [],
+            "added_tables": [],
+        }
+        if not self.enable_bridge_completion or len(seed_tables) < 2:
+            return default_plan
+
+        anchor_tables = []
+        seen = set()
+        for table_name in seed_tables:
+            if table_name in seen:
+                continue
+            seen.add(table_name)
+            anchor_tables.append(table_name)
+
+        for item in column_scores:
+            table_name = item["table"]
+            if table_name in seen:
+                continue
+            if not item.get("supports_table_boost"):
+                continue
+            if item["score"] < 6.5:
+                continue
+            seen.add(table_name)
+            anchor_tables.append(table_name)
+            if len(anchor_tables) >= self.bridge_max_anchor_tables:
+                break
+
+        if len(anchor_tables) < 2:
+            return default_plan
+
+        seed_set = set(seed_tables)
+        candidate_paths = []
+        seen_paths = set()
+        rank_position = {table_name: idx for idx, (table_name, _) in enumerate(ranked_tables)}
+        for idx, left in enumerate(anchor_tables):
+            for right in anchor_tables[idx + 1:]:
+                path = shortest_table_path(schema_meta, left, right)
+                if len(path) < 3 or len(path) > self.bridge_max_path_length:
+                    continue
+                path_key = tuple(path)
+                if path_key in seen_paths:
+                    continue
+                bridge_nodes = [table for table in path[1:-1] if table not in seed_set]
+                if not bridge_nodes:
+                    continue
+                seen_paths.add(path_key)
+                candidate_paths.append(
+                    {
+                        "path": path,
+                        "bridge_nodes": bridge_nodes,
+                        "priority": (
+                            len(path),
+                            rank_position.get(left, 999),
+                            rank_position.get(right, 999),
+                            " -> ".join(path),
+                        ),
+                    }
+                )
+
+        if not candidate_paths:
+            return default_plan
+
+        candidate_paths.sort(key=lambda item: item["priority"])
+        selected_paths = candidate_paths[: self.bridge_max_paths]
+        added_tables = []
+        seen_added = set()
+        for item in selected_paths:
+            for table_name in item["bridge_nodes"]:
+                if table_name in seen_added:
+                    continue
+                seen_added.add(table_name)
+                added_tables.append(table_name)
+
+        if not added_tables:
+            return default_plan
+
+        return {
+            "enabled": True,
+            "anchor_tables": anchor_tables,
+            "paths": [" -> ".join(item["path"]) for item in selected_paths],
+            "added_tables": added_tables,
+        }
+
+    def _expand_tables(self, seed_tables: list, schema_meta: dict, bridge_plan: dict | None = None) -> list:
         if not seed_tables:
             return []
+        if bridge_plan is None:
+            bridge_plan = {
+                "enabled": False,
+                "anchor_tables": seed_tables,
+                "paths": [],
+                "added_tables": [],
+            }
 
         selected = set(seed_tables)
         queue = deque((table_name, 0) for table_name in seed_tables)
@@ -1407,5 +1527,24 @@ class SchemaRetriever:
                 if path:
                     selected.update(path)
 
-        ordered = [table for table in schema_meta["table_order"] if table in selected]
+        if bridge_plan.get("enabled"):
+            for path_text in bridge_plan.get("paths", []):
+                selected.update(path_text.split(" -> "))
+
+        priority_order = []
+        for table_name in seed_tables:
+            if table_name not in priority_order:
+                priority_order.append(table_name)
+        for table_name in bridge_plan.get("added_tables", []):
+            if table_name in selected and table_name not in priority_order:
+                priority_order.append(table_name)
+        for table_name in bridge_plan.get("anchor_tables", []):
+            if table_name in selected and table_name not in priority_order:
+                priority_order.append(table_name)
+
+        ordered = [table for table in priority_order if table in selected]
+        ordered.extend(
+            table for table in schema_meta["table_order"]
+            if table in selected and table not in ordered
+        )
         return ordered[: self.max_return_tables]
