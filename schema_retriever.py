@@ -146,6 +146,41 @@ VALUE_HINT_MEASURE_KEYWORDS = {
     "percent",
 }
 
+AGGREGATION_HINT_KEYWORDS = {
+    "avg",
+    "average",
+    "count",
+    "many",
+    "max",
+    "maximum",
+    "min",
+    "minimum",
+    "number",
+    "sum",
+    "total",
+}
+
+ENTITY_FRIENDLY_COLUMN_NAMES = {
+    "name",
+    "title",
+    "type",
+    "category",
+    "status",
+    "country",
+    "continent",
+    "region",
+    "city",
+    "state",
+    "province",
+    "language",
+    "airportname",
+    "airportcode",
+    "airline",
+    "maker",
+    "model",
+    "fullname",
+}
+
 QUESTION_ENTITY_STOPWORDS = {
     "How",
     "What",
@@ -855,6 +890,7 @@ def render_schema_v6(
     selected_tables: list | None = None,
     seed_tables: list | None = None,
     path_hint_plan: dict | None = None,
+    column_hint_plan: dict | None = None,
     value_hint_plan: dict | None = None,
 ) -> str:
     if selected_tables is None:
@@ -867,6 +903,11 @@ def render_schema_v6(
             "focus_tables": seed_tables,
             "foreign_keys": [],
             "join_paths": [],
+        }
+    if column_hint_plan is None:
+        column_hint_plan = {
+            "enabled": False,
+            "columns": [],
         }
     if value_hint_plan is None:
         value_hint_plan = {
@@ -926,6 +967,13 @@ def render_schema_v6(
             for path in join_paths:
                 schema_lines.append(f"- {path}")
 
+    if column_hint_plan.get("enabled"):
+        schema_lines.append("【优先关注字段】")
+        for item in column_hint_plan.get("columns", []):
+            schema_lines.append(
+                f"- {item['table']}.{item['column']} (列级检索分={item['score']})"
+            )
+
     if value_hint_plan.get("enabled"):
         question_entities = value_hint_plan.get("question_entities", [])
         if question_entities:
@@ -965,6 +1013,8 @@ class SchemaRetriever:
         value_hint_max_columns: int = 10,
         value_hint_max_columns_per_table: int = 4,
         value_hint_max_samples: int = 5,
+        column_retrieval_max_hits: int = 12,
+        column_retrieval_max_hits_per_table: int = 2,
     ):
         self.max_seed_tables = max_seed_tables
         self.max_return_tables = max_return_tables
@@ -978,9 +1028,16 @@ class SchemaRetriever:
             max_columns_per_table=value_hint_max_columns_per_table,
             max_samples_per_column=value_hint_max_samples,
         )
+        self.column_retrieval_max_hits = column_retrieval_max_hits
+        self.column_retrieval_max_hits_per_table = column_retrieval_max_hits_per_table
 
     def retrieve(self, question: str, schema_meta: dict, mode: str = "rag", db_path: str | None = None) -> dict:
-        scores = self._score_tables(question, schema_meta)
+        lexical_scores = self._score_tables(question, schema_meta)
+        column_scores = self._score_columns(question, schema_meta)
+        scores, table_column_boosts = self._merge_table_and_column_scores(
+            lexical_scores=lexical_scores,
+            column_scores=column_scores,
+        )
         ranked_tables = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
         seed_tables = [
             table_name
@@ -1018,6 +1075,10 @@ class SchemaRetriever:
             path_hint_mode=self.path_hint_mode,
             schema_meta=schema_meta,
         )
+        column_hint_plan = self._build_column_hint_plan(
+            column_scores=column_scores,
+            selected_tables=selected_tables,
+        )
         value_hint_plan = self.value_sketcher.build_plan(
             question=question,
             schema_meta=schema_meta,
@@ -1030,6 +1091,7 @@ class SchemaRetriever:
             selected_tables=selected_tables,
             seed_tables=seed_tables,
             path_hint_plan=path_hint_plan,
+            column_hint_plan=column_hint_plan,
             value_hint_plan=value_hint_plan,
         )
         return {
@@ -1050,6 +1112,8 @@ class SchemaRetriever:
             "path_hint_foreign_keys": path_hint_plan["foreign_keys"],
             "path_hint_join_paths": path_hint_plan["join_paths"],
             "path_hint_primary_join_path": path_hint_plan["primary_join_path"],
+            "column_hints_enabled": column_hint_plan["enabled"],
+            "column_hint_columns": column_hint_plan["columns"],
             "value_hints_enabled": value_hint_plan["enabled"],
             "value_hint_question_entities": value_hint_plan["question_entities"],
             "value_hint_entity_matches": value_hint_plan["entity_matches"],
@@ -1059,6 +1123,16 @@ class SchemaRetriever:
                 {"table": table_name, "score": round(score, 3)}
                 for table_name, score in ranked_tables
             ],
+            "table_scores_lexical": [
+                {"table": table_name, "score": round(score, 3)}
+                for table_name, score in sorted(lexical_scores.items(), key=lambda item: (-item[1], item[0]))
+            ],
+            "table_column_boosts": [
+                {"table": table_name, "score": round(score, 3)}
+                for table_name, score in sorted(table_column_boosts.items(), key=lambda item: (-item[1], item[0]))
+                if score > 0
+            ],
+            "column_scores": column_scores,
         }
 
     def _score_tables(self, question: str, schema_meta: dict) -> dict:
@@ -1089,6 +1163,124 @@ class SchemaRetriever:
             scores[table_name] = score
 
         return scores
+
+    def _score_columns(self, question: str, schema_meta: dict) -> list:
+        tokens = set(question_tokens(question))
+        normalized_question = " ".join(tokens)
+        question_entities = extract_question_entities(question)
+        has_code_like_entity = any(re.fullmatch(r"[A-Z]{2,5}", value) for value in question_entities)
+        aggregation_cues = tokens & AGGREGATION_HINT_KEYWORDS
+        ranked = []
+
+        for table_name, table in schema_meta["tables"].items():
+            table_overlap = len(tokens & table["tokens"])
+            table_ranked = []
+
+            for column in table["columns"]:
+                column_name = column["name"]
+                normalized_column_name = column_name.lower()
+                overlap = len(tokens & column["tokens"])
+                score = 0.0
+                reasons = []
+
+                if overlap:
+                    score += overlap * 4.0
+                    reasons.append("token_overlap")
+
+                    exact_bonus = VALUE_HINT_EXACT_COLUMN_SCORES.get(normalized_column_name, 0.0) * 0.4
+                    if exact_bonus:
+                        score += exact_bonus
+                        reasons.append("semantic_exact_bonus")
+
+                full_column_name = " ".join(normalize_identifier_tokens(column_name))
+                if full_column_name and full_column_name in normalized_question:
+                    score += 2.5
+                    reasons.append("full_column_name_match")
+
+                if table_overlap and overlap:
+                    score += table_overlap * 1.25
+                    reasons.append("table_column_alignment")
+
+                if has_code_like_entity and "code" in normalized_column_name:
+                    code_bonus = 2.5
+                    if "airport" in normalized_column_name:
+                        code_bonus += 0.5
+                    score += code_bonus
+                    reasons.append("code_entity_bonus")
+
+                if (
+                    question_entities
+                    and table_overlap
+                    and normalized_column_name in ENTITY_FRIENDLY_COLUMN_NAMES
+                ):
+                    score += 1.5
+                    reasons.append("entity_friendly_column")
+
+                if aggregation_cues and any(keyword in normalized_column_name for keyword in VALUE_HINT_MEASURE_KEYWORDS):
+                    score += 1.5
+                    reasons.append("aggregation_measure_bonus")
+
+                if column["is_primary_key"] and overlap:
+                    score += 0.5
+                    reasons.append("primary_key_overlap")
+
+                if column["foreign_key"] and overlap:
+                    score += 0.5
+                    reasons.append("foreign_key_overlap")
+
+                if score < 2.5:
+                    continue
+
+                table_ranked.append(
+                    {
+                        "table": table_name,
+                        "column": column_name,
+                        "score": round(score, 3),
+                        "reasons": reasons,
+                    }
+                )
+
+            table_ranked.sort(key=lambda item: (-item["score"], item["column"].lower()))
+            ranked.extend(table_ranked[: self.column_retrieval_max_hits_per_table])
+
+        ranked.sort(key=lambda item: (-item["score"], item["table"].lower(), item["column"].lower()))
+        return ranked[: self.column_retrieval_max_hits]
+
+    def _merge_table_and_column_scores(self, lexical_scores: dict, column_scores: list) -> tuple[dict, dict]:
+        column_boosts = {table_name: 0.0 for table_name in lexical_scores}
+        hits_by_table = {}
+        for item in column_scores:
+            hits_by_table.setdefault(item["table"], []).append(item)
+
+        weights = (0.65, 0.3, 0.15)
+        for table_name, hits in hits_by_table.items():
+            boost = 0.0
+            for idx, hit in enumerate(hits[: len(weights)]):
+                boost += hit["score"] * weights[idx]
+            column_boosts[table_name] = min(boost, 4.5)
+
+        fused_scores = {
+            table_name: lexical_scores.get(table_name, 0.0) + column_boosts.get(table_name, 0.0)
+            for table_name in lexical_scores
+        }
+        return fused_scores, column_boosts
+
+    def _build_column_hint_plan(self, column_scores: list, selected_tables: list) -> dict:
+        selected_set = set(selected_tables)
+        filtered = [
+            {
+                "table": item["table"],
+                "column": item["column"],
+                "score": item["score"],
+            }
+            for item in column_scores
+            if item["table"] in selected_set
+        ]
+        filtered = filtered[:6]
+        return {
+            "enabled": bool(filtered),
+            "columns": filtered,
+        }
 
     def _expand_tables(self, seed_tables: list, schema_meta: dict) -> list:
         if not seed_tables:
