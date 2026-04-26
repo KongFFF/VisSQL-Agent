@@ -1125,6 +1125,19 @@ class SchemaRetriever:
             seed_tables=seed_tables,
             db_path=db_path,
         )
+        retrieval_explanation = self._build_retrieval_explanation(
+            applied_mode=applied_mode,
+            fallback_reason=fallback_reason,
+            ranked_tables=ranked_tables,
+            seed_tables=seed_tables,
+            selected_tables=selected_tables,
+            column_scores=column_scores,
+            lexical_scores=lexical_scores,
+            table_column_boosts=table_column_boosts,
+            bridge_plan=bridge_plan,
+            value_hint_plan=value_hint_plan,
+            schema_meta=schema_meta,
+        )
         schema_text = render_schema_v6(
             schema_meta,
             selected_tables=selected_tables,
@@ -1176,6 +1189,7 @@ class SchemaRetriever:
                 if score > 0
             ],
             "column_scores": column_scores,
+            "retrieval_explanation": retrieval_explanation,
         }
 
     def _score_tables(self, question: str, schema_meta: dict) -> dict:
@@ -1495,6 +1509,182 @@ class SchemaRetriever:
             "paths": [" -> ".join(item["path"]) for item in selected_paths],
             "added_tables": added_tables,
         }
+
+    def _build_retrieval_explanation(
+        self,
+        applied_mode: str,
+        fallback_reason: str | None,
+        ranked_tables: list,
+        seed_tables: list,
+        selected_tables: list,
+        column_scores: list,
+        lexical_scores: dict,
+        table_column_boosts: dict,
+        bridge_plan: dict,
+        value_hint_plan: dict,
+        schema_meta: dict,
+    ) -> dict:
+        selected_set = set(selected_tables)
+        seed_set = set(seed_tables)
+        bridge_added_set = set(bridge_plan.get("added_tables", []))
+        join_path_nodes = set()
+        for path in build_join_paths(schema_meta, seed_tables):
+            join_path_nodes.update(path)
+
+        value_matches_by_table = {}
+        for match in value_hint_plan.get("entity_matches", []):
+            value_matches_by_table.setdefault(match["table"], []).append(
+                {
+                    "question_value": match["question_value"],
+                    "column": match["column"],
+                    "match_type": match["match_type"],
+                }
+            )
+
+        top_columns_by_table = {}
+        for item in column_scores:
+            top_columns_by_table.setdefault(item["table"], []).append(
+                {
+                    "column": item["column"],
+                    "score": item["score"],
+                    "reasons": item.get("reasons", []),
+                }
+            )
+
+        table_rationales = []
+        for table_name in selected_tables:
+            selected_as = []
+            reasons = []
+
+            if table_name in seed_set:
+                selected_as.append("seed")
+                reasons.append("selected as a top retrieval seed table")
+            if table_name in bridge_added_set:
+                selected_as.append("bridge_path")
+                reasons.append("added as a bridge table on a shortest foreign-key path")
+            elif table_name in join_path_nodes and table_name not in seed_set:
+                selected_as.append("seed_join_path")
+                reasons.append("kept because it lies on a join path between seed tables")
+            elif table_name not in seed_set:
+                selected_as.append("expanded_context")
+                reasons.append("kept as supporting context under schema subgraph expansion")
+
+            if table_column_boosts.get(table_name, 0.0) > 0:
+                selected_as.append("column_relevant")
+                reasons.append("received extra score from matched columns")
+            if table_name in value_matches_by_table:
+                selected_as.append("value_linked")
+                reasons.append("contains a matched question value from live database inspection")
+            if applied_mode == "full" and table_name not in seed_set:
+                selected_as.append("full_schema_context")
+                if fallback_reason == "low_confidence":
+                    reasons.append("included because retrieval confidence was too low for subgraph-only mode")
+                elif fallback_reason == "no_seed_table":
+                    reasons.append("included because no reliable seed table was found")
+                else:
+                    reasons.append("included because full schema mode was requested")
+
+            table_rationales.append(
+                {
+                    "table": table_name,
+                    "selected_as": selected_as,
+                    "fused_score": round(next((score for name, score in ranked_tables if name == table_name), 0.0), 3),
+                    "lexical_score": round(lexical_scores.get(table_name, 0.0), 3),
+                    "column_boost": round(table_column_boosts.get(table_name, 0.0), 3),
+                    "top_columns": top_columns_by_table.get(table_name, [])[:2],
+                    "value_matches": value_matches_by_table.get(table_name, [])[:2],
+                    "reasons": reasons[:4],
+                }
+            )
+
+        dropped_candidates = []
+        for table_name, score in ranked_tables:
+            if table_name in selected_set:
+                continue
+            if score < self.min_table_score and table_column_boosts.get(table_name, 0.0) <= 0:
+                continue
+            dropped_candidates.append(
+                {
+                    "table": table_name,
+                    "fused_score": round(score, 3),
+                    "lexical_score": round(lexical_scores.get(table_name, 0.0), 3),
+                    "column_boost": round(table_column_boosts.get(table_name, 0.0), 3),
+                    "reason": "ranked below the retained subgraph budget",
+                }
+            )
+            if len(dropped_candidates) >= 4:
+                break
+
+        ambiguities = []
+        entity_groups = {}
+        for match in value_hint_plan.get("entity_matches", []):
+            entity_groups.setdefault(match["question_value"], []).append(match)
+        for question_value, matches in entity_groups.items():
+            unique_targets = sorted({f"{item['table']}.{item['column']}" for item in matches})
+            if len(unique_targets) >= 2:
+                ambiguities.append(
+                    {
+                        "type": "entity_match_ambiguity",
+                        "value": question_value,
+                        "candidates": unique_targets[:4],
+                    }
+                )
+
+        top_column_name_groups = {}
+        for item in column_scores[:8]:
+            top_column_name_groups.setdefault(item["column"].lower(), []).append(item)
+        for column_name, matches in top_column_name_groups.items():
+            candidate_tables = sorted({item["table"] for item in matches})
+            if len(candidate_tables) >= 2:
+                ambiguities.append(
+                    {
+                        "type": "column_name_ambiguity",
+                        "column": column_name,
+                        "candidate_tables": candidate_tables[:4],
+                    }
+                )
+
+        confidence = self._estimate_retrieval_confidence(
+            applied_mode=applied_mode,
+            fallback_reason=fallback_reason,
+            ranked_tables=ranked_tables,
+            seed_tables=seed_tables,
+            value_hint_plan=value_hint_plan,
+            ambiguities=ambiguities,
+        )
+
+        return {
+            "confidence": confidence,
+            "table_rationales": table_rationales,
+            "dropped_candidates": dropped_candidates,
+            "ambiguities": ambiguities[:6],
+        }
+
+    def _estimate_retrieval_confidence(
+        self,
+        applied_mode: str,
+        fallback_reason: str | None,
+        ranked_tables: list,
+        seed_tables: list,
+        value_hint_plan: dict,
+        ambiguities: list,
+    ) -> str:
+        if applied_mode == "full" and fallback_reason in {"low_confidence", "no_seed_table"}:
+            return "low"
+        if not seed_tables:
+            return "low"
+
+        top_score = ranked_tables[0][1] if ranked_tables else 0.0
+        second_score = ranked_tables[1][1] if len(ranked_tables) > 1 else 0.0
+        score_gap = top_score - second_score
+        has_value_match = bool(value_hint_plan.get("entity_matches"))
+        ambiguity_count = len(ambiguities)
+
+        if top_score >= 8.0 and (score_gap >= 2.0 or has_value_match) and ambiguity_count <= 1:
+            return "high"
+        if top_score >= 4.0 and ambiguity_count <= 3:
+            return "medium"
+        return "low"
 
     def _expand_tables(self, seed_tables: list, schema_meta: dict, bridge_plan: dict | None = None) -> list:
         if not seed_tables:
