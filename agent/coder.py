@@ -8,7 +8,7 @@ class CoderNode:
         """
         初始化大模型推理引擎 (动态挂载模式)
         """
-        print(f">>> 🧠 正在唤醒基座模型: {base_model_path} ...")
+        print(f">>> 正在加载基座模型: {base_model_path} ...")
         self.tokenizer = AutoTokenizer.from_pretrained(base_model_path, trust_remote_code=True)
         
         # 1. 先把笨重的“游戏本体”加载进显存
@@ -20,10 +20,10 @@ class CoderNode:
         )
         # 2. 核心魔法：给基座模型穿上 V6 的“外骨骼装甲”
         if lora_path:
-            print(f">>> 🛡️ 正在挂载 V6 LoRA 权重: {lora_path} ...")
+            print(f">>> 正在挂载 LoRA 权重: {lora_path} ...")
             self.model = PeftModel.from_pretrained(base_model, lora_path).eval()
         else:
-            print(">>> 裸奔模式！未提供 LoRA 权重，将直接使用基座模型。")
+            print(">>> 未提供 LoRA 权重，将直接使用基座模型。")
             self.model = base_model.eval()
         
         # 与 V6 单步推理保持严格一致的 System Prompt
@@ -121,7 +121,7 @@ if __name__ == "__main__":
         })
         
         sql_v2 = coder.generate(working_memory)
-        print(f"🧠 大脑反思后的输出 V2:\n{sql_v2}\n")
+        print(f"反思后的输出 V2:\n{sql_v2}\n")
         
     except Exception as e:
         print(f"未找到模型或加载失败，此代码仅作架构演示。报错信息：{e}")
