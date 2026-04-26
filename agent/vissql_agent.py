@@ -23,7 +23,7 @@ class VisSQLAgent:
         初始化 Agent 大堂经理，统筹主厨(Coder)与试吃员(Sandbox)。
         """
         print("\n" + "="*50)
-        print("🚀 VisSQL-Agent 系统启动中...")
+        print(" 系统启动中...")
         print("="*50)
         
         # 1. 雇佣主厨 (加载模型)
@@ -47,7 +47,7 @@ class VisSQLAgent:
         self.superlative_mode = superlative_mode
         self.superlative_router_use_threshold = superlative_router_use_threshold
         self.superlative_router_template_threshold = superlative_router_template_threshold
-        print("✅ 系统初始化完成，随时准备接收查询！\n")
+        print("系统初始化完成\n")
 
     def run_query(
         self,
@@ -130,12 +130,12 @@ class VisSQLAgent:
             }
         elif pattern_result.get("matched"):
             log(
-                f"🧩 Superlative 模板尝试未通过，原因: {pattern_result.get('reason')}。"
+                f"Superlative 模板尝试未通过，原因: {pattern_result.get('reason')}。"
                 " 自动回退到通用 LLM Agent。"
             )
         elif pattern_result.get("reason") not in {"not_superlative", None}:
             log(
-                f"🧩 Superlative 检测命中但不适合模板化，原因: {pattern_result.get('reason')}。"
+                f"Superlative 检测命中但不适合模板化，原因: {pattern_result.get('reason')}。"
                 " 继续使用通用 LLM Agent。"
             )
         
@@ -151,7 +151,7 @@ class VisSQLAgent:
         last_retry_sql = ""
 
         # ==========================================
-        # 🔄 Agent 的灵魂：Reflexion (自我反思) 循环
+        #  Reflexion (自我反思) 循环
         # ==========================================
         for attempt in range(1, self.max_retries + 1):
             log(f"\n▶️  [第 {attempt}/{self.max_retries} 轮推理] Agent 思考中...")
@@ -159,13 +159,13 @@ class VisSQLAgent:
             # 步骤 A：经理把记事本给主厨，主厨写出 SQL
             current_messages = memory.get_current_messages()
             generated_sql = self.coder.generate(current_messages)
-            log(f"🧠 模型生成 SQL:\n{generated_sql}")
+            log(f"模型生成 SQL:\n{generated_sql}")
             
             # 步骤 B：把生成的 SQL 存入记事本
             memory.add_assistant_sql(generated_sql)
 
             # 步骤 C：经理把 SQL 丢进沙盒试运行
-            log(f"🔨 沙盒执行中...")
+            log(f"执行中...")
             result = self.sandbox.execute_query(generated_sql)
             attempt_record = {
                 "attempt": attempt,
@@ -175,8 +175,8 @@ class VisSQLAgent:
 
             # 步骤 D：命运的十字路口 (状态路由)
             if result["status"] == "success":
-                log(f"✅ 执行成功！查出 {result['row_count']} 条数据。")
-                log(f"📊 数据抽样: {result['results'][:2]}")
+                log(f"执行成功！查出 {result['row_count']} 条数据。")
+                log(f"数据抽样: {result['results'][:2]}")
 
                 if result["row_count"] > 0 and first_success_candidate is None:
                     first_success_candidate = {
@@ -277,7 +277,7 @@ class VisSQLAgent:
                     })
                     attempt_record["diagnostics"] = diagnostics
                     if diagnostics["probes"]:
-                        log("🧪 自动探测到以下诊断信息：")
+                        log("自动探测到以下诊断信息：")
                         log(diagnostics["summary"])
                     memory.add_execution_feedback(
                         "EmptyResultError",
@@ -286,7 +286,7 @@ class VisSQLAgent:
                     )
                     attempt_record["feedback_type"] = "EmptyResultError"
                 else:
-                    log("💀 已达到最大重试次数，但查询结果始终为空，Agent 停止重试。")
+                    log("已达到最大重试次数，但查询结果始终为空，Agent 停止重试。")
                     attempt_records.append(attempt_record)
                     if first_success_candidate is not None:
                         log("Retry ended with empty results; falling back to the first successful SQL.")
@@ -316,15 +316,15 @@ class VisSQLAgent:
                     }
                 
             elif result["status"] == "error":
-                log(f"❌ 执行失败！捕获错误: {result['error_type']} - {result['error_msg']}")
+                log(f"执行失败！捕获错误: {result['error_type']} - {result['error_msg']}")
                 
                 # 如果还没到最后一次机会，就触发反思！
                 if attempt < self.max_retries:
-                    log("🔄 触发 Reflexion 机制，正在将报错记录写入 Memory 迫使模型反思...")
+                    log("触发 Reflexion 机制，将报错记录写入 Memory 迫使模型反思...")
                     memory.add_execution_feedback(result["error_type"], result["error_msg"])
                     attempt_record["feedback_type"] = result["error_type"]
                 else:
-                    log("💀 已达到最大重试次数，Agent 放弃挣扎。")
+                    log("已达到最大重试次数。")
                     attempt_records.append(attempt_record)
                     if first_success_candidate is not None:
                         log("Retry ended with execution error; falling back to the first successful SQL.")
@@ -380,7 +380,7 @@ if __name__ == "__main__":
     表 singer_in_concert (concert_ID [FK->concert.concert_ID], Singer_ID [FK->singer.Singer_ID])
     """
     
-    # 😈 终极陷阱：自然语言的性别陷阱
+    # 终极陷阱：自然语言的性别陷阱
     test_question = "列出所有女性歌手的名字和她们的歌曲名。"
 
     # 3. 跑起来！
