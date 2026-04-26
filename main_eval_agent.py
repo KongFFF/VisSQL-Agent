@@ -2,11 +2,11 @@ import argparse
 import json
 from pathlib import Path
 
-from schema_retriever import (
+from retrieval.schema_retriever import (
     SchemaRetriever,
     build_schema_metadata_dict,
 )
-from superlative_profiles import FINAL_SUPERLATIVE_MODE
+from superlative.profiles import FINAL_SUPERLATIVE_MODE
 FINAL_BASELINE_SUPERLATIVE_MODE = FINAL_SUPERLATIVE_MODE
 FINAL_BASELINE_SCHEMA_MODE = "rag"
 FINAL_BASELINE_RETRIEVAL_CONFIG = {
@@ -145,7 +145,7 @@ def resolve_run_profile(args):
 
 def run_evaluation():
     args = parse_args()
-    from main_agent import VisSQLAgent
+    from agent.vissql_agent import VisSQLAgent
 
     dev_path = Path(args.dev_path)
     tables_path = Path(args.tables_path)

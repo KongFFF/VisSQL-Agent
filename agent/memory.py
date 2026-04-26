@@ -1,0 +1,76 @@
+class WorkingMemory:
+    def __init__(self):
+        """
+        初始化工作记忆。
+        （注意：去掉了 system_prompt 的管理，因为那是 Coder 节点内部的逻辑）
+        """
+        self.messages = [] # 原生 ChatML 格式的列表
+        
+    def add_initial_query(self, schema_info: str, question: str):
+        """
+        记录第一次的完整用户查询 (组装 V6 格式)
+        """
+        # 首轮输入严格对齐 V6 训练/推理格式：schema 在前，问题在后
+        combined_content = f"{schema_info}\n\n【问题】\n{question}"
+        self.messages.append({"role": "user", "content": combined_content})
+
+    def add_assistant_sql(self, sql: str):
+        """记录模型生成的 SQL 代码"""
+        self.messages.append({"role": "assistant", "content": sql})
+
+    def add_execution_feedback(self, error_type: str, error_msg: str):
+        """
+        极其核心的加工厂：将冰冷的 SQLite 报错，转化为温暖且严厉的 Prompt
+        """
+        feedback_prompt = (
+            f"【沙盒执行拦截】\n"
+            f"你刚刚生成的 SQL 在真实数据库中执行失败。\n"
+            f"错误类型: {error_type}\n"
+            f"错误详情: {error_msg}\n"
+            f"请仔细核对上方提供的数据库 Schema，深刻反思并输出修正后的 SQL。"
+        )
+        # 这里的 user 代表“沙盒环境”向大模型发出的反馈
+        self.messages.append({"role": "user", "content": feedback_prompt})
+
+    def add_semantic_feedback(self, verifier_result: dict):
+        """将语义校验器的风险提示转成定点修复指令。"""
+        risk_flags = verifier_result.get("risk_flags", [])
+        repair_hints = verifier_result.get("repair_hints", [])
+
+        risk_lines = []
+        for flag in risk_flags:
+            risk_lines.append(
+                f"- [{flag.get('severity', 'medium')}] {flag.get('type', 'semantic_risk')}: {flag.get('message', '')}"
+            )
+
+        hint_lines = [f"- {hint}" for hint in repair_hints]
+        feedback_prompt = (
+            "【语义校验器拦截】\n"
+            "你刚刚生成的 SQL 虽然可以执行，但存在较高的语义风险，可能答非所问。\n"
+            f"校验得分: {verifier_result.get('score', 0.0)}\n"
+            "风险信号：\n"
+            f"{chr(10).join(risk_lines) if risk_lines else '- semantic risk detected'}\n"
+            "修复提示：\n"
+            f"{chr(10).join(hint_lines) if hint_lines else '- Re-check filters, grouping grain, and set semantics.'}\n"
+            "请保留已经正确的部分，只修复高风险的过滤列、分组粒度、投影列或集合运算结构，并输出修正后的 SQL。"
+        )
+        self.messages.append({"role": "user", "content": feedback_prompt})
+        
+    def get_current_messages(self) -> list:
+        """吐出干干净净的对话列表，直接喂给 Coder"""
+        return self.messages
+
+    def snapshot(self) -> list:
+        """导出当前记忆快照，供评测脚本做轨迹存档。"""
+        return [dict(message) for message in self.messages]
+
+# --- 极简测试 ---
+if __name__ == "__main__":
+    memory = WorkingMemory()
+    memory.add_initial_query("表 student (id, name)", "查所有学生")
+    memory.add_assistant_sql("SELECT names FROM student")
+    memory.add_execution_feedback("OperationalError", "no such column: names")
+    
+    print("当前记忆流：")
+    for msg in memory.get_current_messages():
+        print(f"[{msg['role'].upper()}]: {msg['content'][:50]}...")
