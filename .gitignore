@@ -1,6 +1,39 @@
+# =========================
+# Data / weights / archives
+# =========================
 data/
+lora/
 *.zip
 *.pt
+*.bin
+*.safetensors
 
+# =========================
+# Python cache
+# =========================
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# =========================
+# Evaluation outputs
+# Keep eval/.gitkeep and eval/spider_gold.tsv tracked, but ignore generated runs
+# =========================
+eval_*/
+eval_reports/
+eval_analysis_quick.json
+predict_v6.txt
+tmp_oracle_out.json
+
+# =========================
+# Local runtime / logs
+# =========================
+*.log
+*.tmp
+*.bak
+Thumbs.db
+.DS_Store
