@@ -13,9 +13,9 @@ def patch_local_dependencies():
     """
     exec_stub = types.ModuleType("exec_eval")
     exec_stub.eval_exec_match = lambda *args, **kwargs: False
-    sys.modules["exec_eval"] = exec_stub
+    sys.modules["spider_eval.exec_eval"] = exec_stub
 
-    import process_sql
+    from spider_eval import process_sql
 
     process_sql.word_tokenize = lambda s: re.findall(
         r"!=|>=|<=|[(),;=*<>]|\w+(?:\.\w+)?|\"[^\"]*\"|\'[^\']*\'",
@@ -26,20 +26,20 @@ def patch_local_dependencies():
 def build_reports():
     patch_local_dependencies()
 
-    from evaluation import (
+    from spider_eval.evaluation import (
         Evaluator,
         build_foreign_key_map_from_json,
         build_valid_col_units,
         rebuild_sql_col,
         rebuild_sql_val,
     )
-    from process_sql import Schema, get_schema, get_sql
+    from spider_eval.process_sql import Schema, get_schema, get_sql
 
-    base = Path(__file__).resolve().parent
+    base = Path(__file__).resolve().parents[2]
     paths = {
         "agent_no_empty": base / "eval_no_empty_retry" / "predict_agent.txt",
         "agent_with_empty": base / "eval_with_empty_retry" / "predict_agent.txt",
-        "v6": base / "predict_v6.txt",
+        "v6": base / "experiments" / "artifacts" / "predict_v6.txt",
     }
 
     with (base / "data" / "dev.json").open("r", encoding="utf-8") as f:

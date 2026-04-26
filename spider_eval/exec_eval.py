@@ -8,7 +8,7 @@ from itertools import product
 from collections import defaultdict
 import tqdm
 import random
-from parse import get_all_preds_for_execution, remove_distinct
+from .parse import get_all_preds_for_execution, remove_distinct
 import time
 import pickle as pkl
 import subprocess

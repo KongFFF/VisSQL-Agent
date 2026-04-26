@@ -28,6 +28,7 @@ eval_reports/
 eval_analysis_quick.json
 predict_v6.txt
 tmp_oracle_out.json
+experiments/artifacts/
 
 # =========================
 # Local runtime / logs

@@ -24,7 +24,7 @@ import json
 import sqlite3
 import argparse
 
-from process_sql import get_schema, Schema, get_sql
+from .process_sql import get_schema, Schema, get_sql
 
 # Flag to disable value evaluation
 DISABLE_VALUE = True
@@ -646,7 +646,7 @@ def evaluate(
 
             if etype in ["all", "exec"]:
                 if eval_exec_match is None:
-                    from exec_eval import eval_exec_match as _eval_exec_match
+                    from .exec_eval import eval_exec_match as _eval_exec_match
                     eval_exec_match = _eval_exec_match
                 exec_score = eval_exec_match(db=db, p_str=p_str, g_str=g_str, plug_value=plug_value,
                                              keep_distinct=keep_distinct, progress_bar_for_each_datapoint=progress_bar_for_each_datapoint)
