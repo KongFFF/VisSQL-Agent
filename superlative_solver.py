@@ -5,6 +5,19 @@ import sqlite3
 from pathlib import Path
 
 from schema_retriever import normalize_identifier_tokens
+from superlative_profiles import (
+    FINAL_SUPERLATIVE_MODE,
+    allows_count_output_count_family,
+    normalize_superlative_mode,
+    uses_controlled_slot_filling,
+    uses_entity_count_plan_mode,
+    uses_phase0_exclusion_layer,
+    uses_phase1_router,
+    uses_projection_validator,
+    uses_structured_projection_selector,
+    uses_unified_count_planner,
+    uses_decomposed_count_slotting,
+)
 
 
 POSITIVE_PATTERNS = [
@@ -693,14 +706,14 @@ class SuperlativePatternSolver:
         coder,
         sandbox,
         retry_on_empty_result=False,
-        mode="v1",
+        mode=FINAL_SUPERLATIVE_MODE,
         router_use_template_threshold=0.70,
         router_template_threshold=0.65,
     ):
         self.coder = coder
         self.sandbox = sandbox
         self.retry_on_empty_result = retry_on_empty_result
-        self.mode = (mode or "v1").lower()
+        self.mode = normalize_superlative_mode(mode)
         self.router_use_template_threshold = router_use_template_threshold
         self.router_template_threshold = router_template_threshold
 
@@ -1936,52 +1949,9 @@ def projection_is_complete(question, slot):
     return actual_count >= expected_count
 
 
-def uses_phase0_exclusion_layer(mode):
-    mode = (mode or "v1").lower()
-    return mode in {"phase0", "v2", "phase1", "phase1_c", "phase1_d", "phase1_e", "phase2_a", "phase2_b"}
 
 
-def uses_phase1_router(mode):
-    mode = (mode or "").lower()
-    return mode in {"phase1", "phase1_c", "phase1_d", "phase1_e", "phase2_a", "phase2_b"}
-
-
-def uses_controlled_slot_filling(mode):
-    mode = (mode or "").lower()
-    return mode == "phase1_c"
-
-
-def uses_entity_count_plan_mode(mode):
-    mode = (mode or "").lower()
-    return mode in {"phase1_d", "phase1_e"}
-
-
-def uses_structured_projection_selector(mode):
-    mode = (mode or "").lower()
-    return mode == "phase1_e"
-
-
-def uses_unified_count_planner(mode):
-    mode = (mode or "").lower()
-    return mode in {"phase2_a", "phase2_b"}
-
-
-def uses_decomposed_count_slotting(mode):
-    mode = (mode or "").lower()
-    return mode == "phase2_b"
-
-
-def allows_count_output_count_family(mode):
-    mode = (mode or "").lower()
-    return mode == "phase2_b"
-
-
-def uses_projection_validator(mode):
-    mode = (mode or "").lower()
-    return mode in {"phase1_d", "phase1_e", "phase2_a", "phase2_b"}
-
-
-def get_superlative_exclusion_reason(question, mode="v1"):
+def get_superlative_exclusion_reason(question, mode=FINAL_SUPERLATIVE_MODE):
     if not uses_phase0_exclusion_layer(mode):
         return None
 
@@ -2009,7 +1979,7 @@ def get_superlative_exclusion_reason(question, mode="v1"):
     return None
 
 
-def get_candidate_templates(question, slot_hint, schema, mode="phase1"):
+def get_candidate_templates(question, slot_hint, schema, mode=FINAL_SUPERLATIVE_MODE):
     q = question.lower()
     candidates = []
 
@@ -2074,7 +2044,7 @@ def is_single_hop_join_superlative(slot_hint, schema):
     return schema.has_exactly_one_fk_path(target_table, measure_table, max_hops=1)
 
 
-def choose_template(question, slot_hint, schema, mode="v1"):
+def choose_template(question, slot_hint, schema, mode=FINAL_SUPERLATIVE_MODE):
     q = question.lower()
 
     if is_plain_extrema_value_query(q):

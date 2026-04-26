@@ -162,11 +162,6 @@ def _question_requests_count(question):
     return any(token in q for token in ["how many", "number of", "count of", "count "])
 
 
-def _question_requests_each(question):
-    q = _normalize_text(question)
-    return any(token in q for token in ["for each", "each ", " per "])
-
-
 def _question_requests_entity_only(question):
     q = _normalize_text(question)
     if _question_requests_count(question):

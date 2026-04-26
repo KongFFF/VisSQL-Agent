@@ -5,18 +5,51 @@ from pathlib import Path
 from schema_retriever import (
     SchemaRetriever,
     build_schema_metadata_dict,
-    render_schema_v6,
 )
+from superlative_profiles import FINAL_SUPERLATIVE_MODE
+FINAL_BASELINE_SUPERLATIVE_MODE = FINAL_SUPERLATIVE_MODE
+FINAL_BASELINE_SCHEMA_MODE = "rag"
+FINAL_BASELINE_RETRIEVAL_CONFIG = {
+    "retrieval_max_seed_tables": 3,
+    "retrieval_max_return_tables": 6,
+    "retrieval_expand_hops": 1,
+    "retrieval_min_table_score": 1.0,
+    "retrieval_auto_threshold": 3.0,
+    "path_hint_mode": "off",
+    "disable_value_hints": False,
+    "value_hint_max_columns": 10,
+    "value_hint_max_columns_per_table": 4,
+    "value_hint_max_samples": 5,
+    "disable_bridge_completion": True,
+    "retry_on_empty_result": False,
+}
 
-def build_schema_dict_v6(tables_path: Path) -> dict:
-    """
-    兼容旧逻辑：解析 Spider tables.json，生成全量 schema 文本。
-    """
-    schema_meta_dict = build_schema_metadata_dict(tables_path)
-    return {
-        db_id: render_schema_v6(schema_meta)
-        for db_id, schema_meta in schema_meta_dict.items()
-    }
+EXPERIMENT_PRESETS = {
+    "value_hints_off": {
+        "description": "关闭 value grounding，复现 P0 前后的核心消融。",
+        "overrides": {
+            "disable_value_hints": True,
+        },
+    },
+    "bridge_v1": {
+        "description": "开启显式 bridge completion，对比 seed-first only 与 bridge_v1。",
+        "overrides": {
+            "disable_bridge_completion": False,
+        },
+    },
+    "legacy_phase1_d": {
+        "description": "回到 phase1_d 模板实验模式，保留当前正式 retrieval 配置。",
+        "overrides": {
+            "superlative_mode": "phase1_d",
+        },
+    },
+    "legacy_phase2_a": {
+        "description": "回到 phase2_a 统一 count-family planner 实验模式。",
+        "overrides": {
+            "superlative_mode": "phase2_a",
+        },
+    },
+}
 
 
 def make_jsonable(value):
@@ -50,8 +83,7 @@ def should_archive_trajectory(agent_result: dict) -> bool:
     return agent_result.get("attempts", 1) > 1 or agent_result.get("had_probe", False)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="批量评测 VisSQLAgent 在 Spider dev 集上的表现。")
+def add_common_args(parser):
     parser.add_argument("--base-model", required=True, help="基座模型路径")
     parser.add_argument("--lora-path", default=None, help="LoRA 权重路径，可为空")
     parser.add_argument("--dev-path", default="data/dev.json", help="Spider dev.json 路径")
@@ -62,48 +94,53 @@ def parse_args():
     parser.add_argument("--summary-file", default="agent_run_summary.jsonl", help="轻量摘要日志文件名")
     parser.add_argument("--trajectory-file", default="agent_trajectories.jsonl", help="完整轨迹日志文件名")
     parser.add_argument("--max-retries", type=int, default=3, help="Agent 最大重试轮数")
-    parser.add_argument("--retry-on-empty-result", action="store_true", help="是否在空结果时触发额外的 Reflexion / probe")
     parser.add_argument(
-        "--superlative-mode",
-        choices=["v1", "v2", "phase0", "phase1", "phase1_c", "phase1_d", "phase1_e", "phase2_a", "phase2_b"],
-        default="v1",
-        help="superlative mode: v1=original, phase0=current template + exclusion layer, v2=alias of phase0, phase1=non-trained router, phase1_c=phase1 with controlled slot filling, phase1_d=phase1 plus enumerated entity-count planner, phase1_e=phase1_d plus structured projection selection for count-family templates, phase2_a=unified count-family planner, phase2_b=phase2_a plus decomposed count slotting",
+        "--entrypoint",
+        choices=["formal", "experiment"],
+        default="formal",
+        help="formal=最终正式基线入口，experiment=少量保留消融/历史模式入口",
     )
-    parser.add_argument(
-        "--superlative-router-use-threshold",
-        type=float,
-        default=0.70,
-        help="minimum p(use_template) for phase1 router to allow template takeover",
-    )
-    parser.add_argument(
-        "--superlative-router-template-threshold",
-        type=float,
-        default=0.65,
-        help="minimum selected template confidence for phase1 router to allow template takeover",
-    )
-    parser.add_argument(
-        "--schema-mode",
-        choices=["full", "rag", "auto"],
-        default="full",
-        help="schema 提供方式：full=全量 schema，rag=检索子图，auto=低置信时自动回退全量 schema",
-    )
-    parser.add_argument("--retrieval-max-seed-tables", type=int, default=3, help="Schema Retriever 初始种子表上限")
-    parser.add_argument("--retrieval-max-return-tables", type=int, default=6, help="Schema Retriever 最终返回的表上限")
-    parser.add_argument("--retrieval-expand-hops", type=int, default=1, help="Schema Retriever 的 FK 邻接扩展 hop 数")
-    parser.add_argument("--retrieval-min-table-score", type=float, default=1.0, help="Schema Retriever 选入种子表的最低分数")
-    parser.add_argument("--retrieval-auto-threshold", type=float, default=3.0, help="auto 模式下触发子图检索的最低置信阈值")
-    parser.add_argument("--schema-path-hints", action="store_true", help="是否在检索后的 schema 中附加候选连接关系与连接路径提示")
-    parser.add_argument("--schema-path-hints-selective", action="store_true", help="是否只在高结构风险题上选择性注入主路径提示")
-    parser.add_argument("--disable-value-hints", action="store_true", help="disable schema value hints built from live DB values")
-    parser.add_argument("--value-hint-max-columns", type=int, default=10, help="max candidate columns for schema value hints")
-    parser.add_argument("--value-hint-max-columns-per-table", type=int, default=4, help="max candidate columns per table for schema value hints")
-    parser.add_argument("--value-hint-max-samples", type=int, default=5, help="max preview values per hinted column")
-    parser.add_argument("--disable-bridge-completion", action="store_true", help="disable explicit bridge-table shortest-path completion while keeping seed-first table retention")
     parser.add_argument("--progress-every", type=int, default=50, help="每多少题打印一次进度")
     parser.add_argument("--resume", action="store_true", help="从已有输出继续跑")
     parser.add_argument("--start-index", type=int, default=0, help="从第几题开始跑（0-based）")
     parser.add_argument("--end-index", type=int, default=None, help="跑到第几题结束（不含，0-based）")
-    return parser.parse_args()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="批量评测 VisSQLAgent 在 Spider dev 集上的表现。")
+    add_common_args(parser)
+    parser.add_argument(
+        "--experiment",
+        choices=sorted(EXPERIMENT_PRESETS),
+        default=None,
+        help="experiment 入口下选择要跑的少量保留消融/历史模式",
+    )
+    args = parser.parse_args()
+    return resolve_run_profile(args)
+
+
+def resolve_run_profile(args):
+    args.superlative_mode = FINAL_BASELINE_SUPERLATIVE_MODE
+    args.schema_mode = FINAL_BASELINE_SCHEMA_MODE
+    args.superlative_router_use_threshold = 0.70
+    args.superlative_router_template_threshold = 0.65
+
+    for key, value in FINAL_BASELINE_RETRIEVAL_CONFIG.items():
+        setattr(args, key, value)
+
+    if args.entrypoint == "formal":
+        if args.experiment is not None:
+            raise SystemExit("formal 入口不接受 --experiment；如需消融，请使用 --entrypoint experiment。")
+        return args
+
+    if not args.experiment:
+        choices = ", ".join(sorted(EXPERIMENT_PRESETS))
+        raise SystemExit(f"experiment 入口必须指定 --experiment，可选项：{choices}")
+
+    preset = EXPERIMENT_PRESETS[args.experiment]
+    for key, value in preset["overrides"].items():
+        setattr(args, key, value)
+    return args
 
 
 def run_evaluation():
@@ -122,20 +159,13 @@ def run_evaluation():
 
     print(">>> 正在加载 Spider 配置与题目集...")
     schema_meta_dict = build_schema_metadata_dict(tables_path)
-    if args.schema_path_hints_selective:
-        path_hint_mode = "selective"
-    elif args.schema_path_hints:
-        path_hint_mode = "all"
-    else:
-        path_hint_mode = "off"
-
     schema_retriever = SchemaRetriever(
         max_seed_tables=args.retrieval_max_seed_tables,
         max_return_tables=args.retrieval_max_return_tables,
         expand_hops=args.retrieval_expand_hops,
         min_table_score=args.retrieval_min_table_score,
         auto_mode_threshold=args.retrieval_auto_threshold,
-        path_hint_mode=path_hint_mode,
+        path_hint_mode=args.path_hint_mode,
         enable_value_hints=not args.disable_value_hints,
         value_hint_max_columns=args.value_hint_max_columns,
         value_hint_max_columns_per_table=args.value_hint_max_columns_per_table,

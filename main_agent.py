@@ -4,6 +4,7 @@ from agent_coder import CoderNode
 from agent_executor import SQLSandbox
 from agent_memory import WorkingMemory
 from semantic_verifier import SemanticVerifier
+from superlative_profiles import FINAL_SUPERLATIVE_MODE
 from superlative_solver import SuperlativePatternSolver
 
 class VisSQLAgent:
@@ -14,7 +15,7 @@ class VisSQLAgent:
         db_path: str,
         max_retries: int = 3,
         retry_on_empty_result: bool = False,
-        superlative_mode: str = "v1",
+        superlative_mode: str = FINAL_SUPERLATIVE_MODE,
         superlative_router_use_threshold: float = 0.70,
         superlative_router_template_threshold: float = 0.65,
     ):
