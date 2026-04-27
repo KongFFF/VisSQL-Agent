@@ -1,0 +1,713 @@
+import argparse
+import json
+from collections import Counter
+from pathlib import Path
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate a static explainability dashboard for a VisSQL-Agent experiment."
+    )
+    parser.add_argument(
+        "--experiment-dir",
+        required=True,
+        help="Experiment directory containing agent_run_summary.jsonl and optional agent_trajectories.jsonl.",
+    )
+    parser.add_argument(
+        "--dashboard-dir",
+        default=None,
+        help="Output dashboard directory. Defaults to <experiment-dir>/dashboard.",
+    )
+    parser.add_argument(
+        "--title",
+        default=None,
+        help="Optional dashboard title. Defaults to experiment directory name.",
+    )
+    return parser.parse_args()
+
+
+def load_jsonl(path: Path):
+    rows = []
+    if not path.exists():
+        return rows
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def make_jsonable(value):
+    if isinstance(value, dict):
+        return {str(k): make_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [make_jsonable(v) for v in value]
+    return value
+
+
+def build_overview(summary_rows):
+    total = len(summary_rows)
+    if total == 0:
+        return {}
+
+    success_count = sum(1 for row in summary_rows if row.get("is_success"))
+    route_counts = Counter(row.get("route", "<missing>") for row in summary_rows)
+    pattern_reason_counts = Counter(
+        row.get("pattern_reason") for row in summary_rows if row.get("pattern_reason")
+    )
+    pattern_template_counts = Counter(
+        row.get("pattern_template") for row in summary_rows if row.get("pattern_template")
+    )
+    skill_rows = [row for row in summary_rows if row.get("route") == "superlative_pattern"]
+    pattern_signal_rows = [
+        row
+        for row in summary_rows
+        if row.get("pattern_reason") not in (None, "not_superlative")
+        or row.get("pattern_template")
+    ]
+    generic_pattern_rows = [
+        row
+        for row in summary_rows
+        if row.get("route") == "generic_llm"
+        and row.get("pattern_reason") not in (None, "not_superlative")
+    ]
+
+    avg_attempts = sum(row.get("attempts", 0) for row in summary_rows) / total
+    reflexion_count = sum(1 for row in summary_rows if row.get("had_reflexion"))
+    probe_count = sum(1 for row in summary_rows if row.get("had_probe"))
+    fallback_count = sum(1 for row in summary_rows if row.get("used_success_fallback"))
+
+    return {
+        "total_questions": total,
+        "execution_success_count": success_count,
+        "execution_success_rate": round(success_count / total, 4),
+        "average_attempts": round(avg_attempts, 3),
+        "had_reflexion_count": reflexion_count,
+        "had_reflexion_rate": round(reflexion_count / total, 4),
+        "had_probe_count": probe_count,
+        "had_probe_rate": round(probe_count / total, 4),
+        "success_fallback_count": fallback_count,
+        "success_fallback_rate": round(fallback_count / total, 4),
+        "route_counts": dict(route_counts),
+        "route_rates": {key: round(val / total, 4) for key, val in route_counts.items()},
+        "skill_coverage_count": len(skill_rows),
+        "skill_coverage_rate": round(len(skill_rows) / total, 4),
+        "pattern_signal_count": len(pattern_signal_rows),
+        "pattern_signal_rate": round(len(pattern_signal_rows) / total, 4),
+        "skill_execution_success_count": sum(1 for row in skill_rows if row.get("is_success")),
+        "skill_execution_success_rate": round(
+            sum(1 for row in skill_rows if row.get("is_success")) / len(skill_rows), 4
+        )
+        if skill_rows
+        else None,
+        "pattern_template_counts": dict(pattern_template_counts),
+        "pattern_reason_counts": dict(pattern_reason_counts),
+        "generic_pattern_reason_counts": dict(
+            Counter(row.get("pattern_reason") for row in generic_pattern_rows)
+        ),
+    }
+
+
+def build_cases(summary_rows, trajectory_map):
+    cases = []
+    for row in summary_rows:
+        idx = row["question_index"]
+        trajectory = trajectory_map.get(idx)
+        agent_result = trajectory.get("agent_result") if trajectory else None
+        attempt_records = agent_result.get("attempt_records", []) if agent_result else []
+        probe_logs = agent_result.get("probe_logs", []) if agent_result else []
+
+        case = {
+            "question_index": idx,
+            "db_id": row.get("db_id"),
+            "question": row.get("question"),
+            "gold_sql": row.get("gold_sql"),
+            "final_sql": row.get("final_sql"),
+            "route": row.get("route"),
+            "is_success": row.get("is_success"),
+            "attempts": row.get("attempts"),
+            "had_reflexion": row.get("had_reflexion"),
+            "had_probe": row.get("had_probe"),
+            "probe_scenarios": row.get("probe_scenarios"),
+            "final_failure_type": row.get("final_failure_type"),
+            "final_row_count": row.get("final_row_count"),
+            "execution_time_sec": row.get("execution_time_sec"),
+            "superlative_mode": row.get("superlative_mode"),
+            "pattern_reason": row.get("pattern_reason"),
+            "pattern_template": row.get("pattern_template"),
+            "pattern_candidate_templates": row.get("pattern_candidate_templates"),
+            "pattern_router_decision": make_jsonable(row.get("pattern_router_decision")),
+            "schema_selected_tables": row.get("schema_selected_tables"),
+            "schema_seed_tables": row.get("schema_seed_tables"),
+            "schema_selected_foreign_keys": row.get("schema_selected_foreign_keys"),
+            "schema_join_paths": row.get("schema_join_paths"),
+            "schema_bridge_completion_enabled": row.get("schema_bridge_completion_enabled"),
+            "schema_bridge_anchor_tables": row.get("schema_bridge_anchor_tables"),
+            "schema_bridge_paths": row.get("schema_bridge_paths"),
+            "schema_bridge_added_tables": row.get("schema_bridge_added_tables"),
+            "schema_retrieval_explanation": make_jsonable(row.get("schema_retrieval_explanation")),
+            "schema_column_hints_enabled": row.get("schema_column_hints_enabled"),
+            "schema_column_hint_columns": row.get("schema_column_hint_columns"),
+            "schema_value_hints_enabled": row.get("schema_value_hints_enabled"),
+            "schema_value_hint_question_entities": row.get("schema_value_hint_question_entities"),
+            "schema_value_hint_entity_matches": row.get("schema_value_hint_entity_matches"),
+            "schema_value_hint_sampled_values": row.get("schema_value_hint_sampled_values"),
+            "schema_value_hint_candidate_columns": row.get("schema_value_hint_candidate_columns"),
+            "schema_table_scores_lexical": row.get("schema_table_scores_lexical"),
+            "schema_table_column_boosts": row.get("schema_table_column_boosts"),
+            "schema_column_scores": row.get("schema_column_scores"),
+            "semantic_retry_count": row.get("semantic_retry_count"),
+            "final_verifier_result": make_jsonable(row.get("final_verifier_result")),
+            "used_success_fallback": row.get("used_success_fallback"),
+            "success_fallback_reason": row.get("success_fallback_reason"),
+            "selected_success_attempt": row.get("selected_success_attempt"),
+            "attempt_records": make_jsonable(attempt_records),
+            "probe_logs": make_jsonable(probe_logs),
+        }
+        cases.append(case)
+    return cases
+
+
+def write_data_json(dashboard_dir: Path, payload: dict):
+    data_path = dashboard_dir / "data.json"
+    with data_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+
+
+def build_html(title: str):
+    html = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>__TITLE__</title>
+  <style>
+    :root {{
+      --bg: #f6f7f9;
+      --card: #ffffff;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --accent: #0f766e;
+      --accent-soft: #ccfbf1;
+      --ok: #166534;
+      --ok-soft: #dcfce7;
+      --bad: #991b1b;
+      --bad-soft: #fee2e2;
+      --warn: #92400e;
+      --warn-soft: #fef3c7;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }}
+    .page {{
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      min-height: 100vh;
+    }}
+    .sidebar {{
+      border-right: 1px solid var(--line);
+      background: #fbfbfc;
+      padding: 18px 16px;
+      overflow-y: auto;
+    }}
+    .content {{
+      padding: 20px;
+      overflow-y: auto;
+    }}
+    h1, h2, h3 {{
+      margin: 0 0 10px;
+      line-height: 1.2;
+    }}
+    .muted {{ color: var(--muted); }}
+    .card {{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 18px rgba(15, 23, 42, 0.04);
+    }}
+    .metrics {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }}
+    .metric {{
+      background: linear-gradient(180deg, #ffffff, #f8fafc);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }}
+    .metric .label {{
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }}
+    .metric .value {{
+      font-size: 24px;
+      font-weight: 700;
+    }}
+    .pill {{
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-right: 6px;
+      margin-bottom: 6px;
+      border: 1px solid transparent;
+    }}
+    .pill.ok {{ color: var(--ok); background: var(--ok-soft); }}
+    .pill.bad {{ color: var(--bad); background: var(--bad-soft); }}
+    .pill.warn {{ color: var(--warn); background: var(--warn-soft); }}
+    .pill.accent {{ color: var(--accent); background: var(--accent-soft); }}
+    .chips {{ margin-top: 6px; }}
+    input, select {{
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      margin-bottom: 10px;
+      font: inherit;
+      background: #fff;
+    }}
+    .case-list {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }}
+    .case-item {{
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      cursor: pointer;
+      background: #fff;
+    }}
+    .case-item:hover {{ border-color: #cbd5e1; }}
+    .case-item.active {{
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
+    }}
+    .case-item .title {{
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }}
+    .case-item .subtitle {{
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }}
+    .codebox, pre {{
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 12px;
+      padding: 12px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }}
+    .grid-two {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }}
+    .kv {{
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 8px;
+      align-items: start;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }}
+    .kv .k {{
+      color: var(--muted);
+      font-weight: 600;
+    }}
+    .section-title {{
+      margin-bottom: 10px;
+      font-size: 16px;
+      font-weight: 700;
+    }}
+    .table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }}
+    .table th, .table td {{
+      border-bottom: 1px solid var(--line);
+      padding: 8px 6px;
+      text-align: left;
+      vertical-align: top;
+    }}
+    .small {{ font-size: 12px; }}
+    @media (max-width: 1100px) {{
+      .page {{ grid-template-columns: 1fr; }}
+      .sidebar {{ border-right: none; border-bottom: 1px solid var(--line); }}
+      .grid-two {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <aside class="sidebar">
+      <div class="card">
+        <h1>__TITLE__</h1>
+        <div class="muted small" id="meta"></div>
+      </div>
+
+      <div class="card">
+        <h3>筛选</h3>
+        <input id="searchInput" placeholder="搜索题号 / db_id / 问题关键词" />
+        <select id="routeFilter">
+          <option value="">全部 route</option>
+          <option value="superlative_pattern">superlative_pattern</option>
+          <option value="generic_llm">generic_llm</option>
+        </select>
+        <select id="successFilter">
+          <option value="">全部结果</option>
+          <option value="true">只看成功</option>
+          <option value="false">只看失败</option>
+        </select>
+        <select id="patternFilter">
+          <option value="">全部 pattern 情况</option>
+          <option value="applied">只看 skill 命中</option>
+          <option value="signal">只看有 pattern signal</option>
+          <option value="fallback">只看 pattern fallback</option>
+          <option value="value">只看有 value hints</option>
+          <option value="fallback_used">只看启用 success fallback</option>
+        </select>
+      </div>
+
+      <div class="card">
+        <h3>题目列表</h3>
+        <div class="muted small" id="caseCount"></div>
+        <div class="case-list" id="caseList"></div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <div class="card">
+        <div class="section-title">总览</div>
+        <div class="metrics" id="metrics"></div>
+      </div>
+
+      <div class="grid-two">
+        <div class="card">
+          <div class="section-title">Route / Skill 指标</div>
+          <div id="routeStats"></div>
+        </div>
+        <div class="card">
+          <div class="section-title">Pattern / Template 分布</div>
+          <div id="patternStats"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="section-title">案例详情</div>
+        <div id="caseDetail" class="muted">请选择左侧题目。</div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const state = {{
+      data: null,
+      filteredCases: [],
+      selectedIndex: null,
+    }};
+
+    function escapeHtml(value) {{
+      if (value === null || value === undefined) return '';
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }}
+
+    function formatPercent(value) {{
+      if (value === null || value === undefined) return '-';
+      return (value * 100).toFixed(1) + '%';
+    }}
+
+    function renderOverview() {{
+      const data = state.data;
+      const overview = data.overview;
+      document.getElementById('meta').innerHTML = `
+        实验目录：<code>${{escapeHtml(data.meta.experiment_dir_name)}}</code><br/>
+        题目数：<strong>${{overview.total_questions}}</strong>
+      `;
+
+      const metrics = [
+        ['Execution Success', formatPercent(overview.execution_success_rate)],
+        ['Skill Coverage', formatPercent(overview.skill_coverage_rate)],
+        ['Pattern Signal', formatPercent(overview.pattern_signal_rate)],
+        ['Avg Attempts', overview.average_attempts],
+        ['Reflexion Rate', formatPercent(overview.had_reflexion_rate)],
+        ['Probe Rate', formatPercent(overview.had_probe_rate)],
+        ['Success Fallback', formatPercent(overview.success_fallback_rate)],
+        ['Skill Success', overview.skill_execution_success_rate === null ? '-' : formatPercent(overview.skill_execution_success_rate)],
+      ];
+
+      document.getElementById('metrics').innerHTML = metrics.map(([label, value]) => `
+        <div class="metric">
+          <div class="label">${{label}}</div>
+          <div class="value">${{value}}</div>
+        </div>
+      `).join('');
+
+      document.getElementById('routeStats').innerHTML = renderDictTable(
+        {{
+          ...overview.route_counts,
+          ...Object.fromEntries(Object.entries(overview.route_rates).map(([k,v]) => [`${{k}} rate`, formatPercent(v)])),
+        }}
+      );
+
+      const patternLines = {{
+        ...Object.fromEntries(Object.entries(overview.pattern_template_counts).map(([k, v]) => [`template:${{k}}`, v])),
+        ...Object.fromEntries(Object.entries(overview.generic_pattern_reason_counts).slice(0, 10).map(([k, v]) => [`fallback:${{k}}`, v])),
+      }};
+      document.getElementById('patternStats').innerHTML = renderDictTable(patternLines);
+    }}
+
+    function renderDictTable(obj) {{
+      const rows = Object.entries(obj || {});
+      if (!rows.length) return '<div class="muted">暂无数据</div>';
+      return `
+        <table class="table">
+          <thead><tr><th>项</th><th>值</th></tr></thead>
+          <tbody>
+            ${{rows.map(([k, v]) => `<tr><td>${{escapeHtml(k)}}</td><td>${{escapeHtml(typeof v === 'object' ? JSON.stringify(v) : v)}}</td></tr>`).join('')}}
+          </tbody>
+        </table>
+      `;
+    }}
+
+    function getFilters() {{
+      return {{
+        search: document.getElementById('searchInput').value.trim().toLowerCase(),
+        route: document.getElementById('routeFilter').value,
+        success: document.getElementById('successFilter').value,
+        pattern: document.getElementById('patternFilter').value,
+      }};
+    }}
+
+    function applyFilters() {{
+      const filters = getFilters();
+      const cases = state.data.cases.filter((item) => {{
+        const haystack = `${{item.question_index}} ${{item.db_id || ''}} ${{item.question || ''}}`.toLowerCase();
+        if (filters.search && !haystack.includes(filters.search)) return false;
+        if (filters.route && item.route !== filters.route) return false;
+        if (filters.success && String(Boolean(item.is_success)) !== filters.success) return false;
+        if (filters.pattern === 'applied' && item.route !== 'superlative_pattern') return false;
+        if (filters.pattern === 'signal' && !((item.pattern_reason && item.pattern_reason !== 'not_superlative') || item.pattern_template)) return false;
+        if (filters.pattern === 'fallback' && !(item.route === 'generic_llm' && item.pattern_reason && item.pattern_reason !== 'not_superlative')) return false;
+        if (filters.pattern === 'value' && !item.schema_value_hints_enabled) return false;
+        if (filters.pattern === 'fallback_used' && !item.used_success_fallback) return false;
+        return true;
+      }});
+      state.filteredCases = cases;
+      if (!cases.find((item) => item.question_index === state.selectedIndex)) {{
+        state.selectedIndex = cases.length ? cases[0].question_index : null;
+      }}
+      renderCaseList();
+      renderCaseDetail();
+    }}
+
+    function renderCaseList() {{
+      const listEl = document.getElementById('caseList');
+      const countEl = document.getElementById('caseCount');
+      countEl.textContent = `当前筛选：${{state.filteredCases.length}} 题`;
+      listEl.innerHTML = state.filteredCases.map((item) => {{
+        const active = item.question_index === state.selectedIndex ? 'active' : '';
+        const pills = [
+          `<span class="pill ${{item.is_success ? 'ok' : 'bad'}}">${{item.is_success ? 'success' : 'failure'}}</span>`,
+          `<span class="pill accent">${{escapeHtml(item.route || 'unknown')}}</span>`,
+        ];
+        if (item.pattern_template) pills.push(`<span class="pill warn">${{escapeHtml(item.pattern_template)}}</span>`);
+        if (item.used_success_fallback) pills.push(`<span class="pill warn">fallback</span>`);
+        return `
+          <div class="case-item ${{active}}" data-case-id="${{item.question_index}}">
+            <div class="title">#${{item.question_index}} · ${{escapeHtml(item.db_id || '')}}</div>
+            <div class="subtitle">${{escapeHtml((item.question || '').slice(0, 90))}}</div>
+            <div class="chips">${{pills.join('')}}</div>
+          </div>
+        `;
+      }}).join('');
+
+      listEl.querySelectorAll('.case-item').forEach((node) => {{
+        node.addEventListener('click', () => {{
+          state.selectedIndex = Number(node.dataset.caseId);
+          renderCaseList();
+          renderCaseDetail();
+        }});
+      }});
+    }}
+
+    function renderCaseDetail() {{
+      const detail = document.getElementById('caseDetail');
+      const item = state.filteredCases.find((row) => row.question_index === state.selectedIndex);
+      if (!item) {{
+        detail.innerHTML = '<div class="muted">当前筛选条件下没有题目。</div>';
+        return;
+      }}
+
+      const summaryRows = [
+        ['Question Index', item.question_index],
+        ['DB', item.db_id],
+        ['Route', item.route],
+        ['Pattern Template', item.pattern_template || '-'],
+        ['Pattern Reason', item.pattern_reason || '-'],
+        ['Success', item.is_success],
+        ['Attempts', item.attempts],
+        ['Had Reflexion', item.had_reflexion],
+        ['Had Probe', item.had_probe],
+        ['Semantic Retries', item.semantic_retry_count],
+        ['Success Fallback', item.used_success_fallback],
+        ['Fallback Reason', item.success_fallback_reason || '-'],
+        ['Execution Time (s)', item.execution_time_sec ?? '-'],
+        ['Row Count', item.final_row_count ?? '-'],
+      ];
+
+      const blocks = `
+        <div class="card">
+          <div class="section-title">问题与结果</div>
+          <div class="kv"><div class="k">Question</div><div>${{escapeHtml(item.question || '')}}</div></div>
+          <div class="kv"><div class="k">Gold SQL</div><div><pre>${{escapeHtml(item.gold_sql || '')}}</pre></div></div>
+          <div class="kv"><div class="k">Final SQL</div><div><pre>${{escapeHtml(item.final_sql || '')}}</pre></div></div>
+          ${summaryRows.map(([k,v]) => `<div class="kv"><div class="k">${{escapeHtml(k)}}</div><div>${{escapeHtml(v)}}</div></div>`).join('')}
+        </div>
+
+        <div class="grid-two">
+          <div class="card">
+            <div class="section-title">Retrieval</div>
+            <div class="kv"><div class="k">Seed Tables</div><div>${{escapeHtml(JSON.stringify(item.schema_seed_tables || []))}}</div></div>
+            <div class="kv"><div class="k">Selected Tables</div><div>${{escapeHtml(JSON.stringify(item.schema_selected_tables || []))}}</div></div>
+            <div class="kv"><div class="k">Selected FKs</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_selected_foreign_keys || [], null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Join Paths</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_join_paths || [], null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Explanation</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_retrieval_explanation || {{}}, null, 2))}}</pre></div></div>
+          </div>
+
+          <div class="card">
+            <div class="section-title">Value Grounding</div>
+            <div class="kv"><div class="k">Value Hints Enabled</div><div>${{escapeHtml(item.schema_value_hints_enabled)}}</div></div>
+            <div class="kv"><div class="k">Question Entities</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_value_hint_question_entities || [], null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Entity Matches</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_value_hint_entity_matches || [], null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Sampled Values</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_value_hint_sampled_values || {{}}, null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Candidate Columns</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_value_hint_candidate_columns || [], null, 2))}}</pre></div></div>
+          </div>
+        </div>
+
+        <div class="grid-two">
+          <div class="card">
+            <div class="section-title">Pattern / Skill Route</div>
+            <div class="kv"><div class="k">Candidate Templates</div><div><pre>${{escapeHtml(JSON.stringify(item.pattern_candidate_templates || [], null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Router Decision</div><div><pre>${{escapeHtml(JSON.stringify(item.pattern_router_decision || {{}}, null, 2))}}</pre></div></div>
+          </div>
+
+          <div class="card">
+            <div class="section-title">Verifier / Fallback</div>
+            <div class="kv"><div class="k">Final Verifier Result</div><div><pre>${{escapeHtml(JSON.stringify(item.final_verifier_result || {{}}, null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Used Success Fallback</div><div>${{escapeHtml(item.used_success_fallback)}}</div></div>
+            <div class="kv"><div class="k">Selected Success Attempt</div><div>${{escapeHtml(item.selected_success_attempt ?? '-')}}</div></div>
+          </div>
+        </div>
+
+        <div class="grid-two">
+          <div class="card">
+            <div class="section-title">Column Signals</div>
+            <div class="kv"><div class="k">Column Hints Enabled</div><div>${{escapeHtml(item.schema_column_hints_enabled)}}</div></div>
+            <div class="kv"><div class="k">Hint Columns</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_column_hint_columns || [], null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Table Lexical Scores</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_table_scores_lexical || {{}}, null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Table Column Boosts</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_table_column_boosts || {{}}, null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Column Scores</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_column_scores || {{}}, null, 2))}}</pre></div></div>
+          </div>
+
+          <div class="card">
+            <div class="section-title">Attempts / Probe Logs</div>
+            <div class="kv"><div class="k">Attempt Records</div><div><pre>${{escapeHtml(JSON.stringify(item.attempt_records || [], null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Probe Logs</div><div><pre>${{escapeHtml(JSON.stringify(item.probe_logs || [], null, 2))}}</pre></div></div>
+          </div>
+        </div>
+      `;
+
+      detail.innerHTML = blocks;
+    }}
+
+    async function bootstrap() {{
+      const res = await fetch('./data.json');
+      state.data = await res.json();
+      renderOverview();
+
+      ['searchInput', 'routeFilter', 'successFilter', 'patternFilter'].forEach((id) => {{
+        document.getElementById(id).addEventListener('input', applyFilters);
+        document.getElementById(id).addEventListener('change', applyFilters);
+      }});
+      applyFilters();
+    }}
+
+    bootstrap().catch((err) => {{
+      document.getElementById('caseDetail').innerHTML = `<pre>${{escapeHtml(String(err))}}</pre>`;
+    }});
+  </script>
+</body>
+</html>
+"""
+    return html.replace("__TITLE__", title)
+
+
+def main():
+    args = parse_args()
+    experiment_dir = Path(args.experiment_dir).resolve()
+    dashboard_dir = (
+        Path(args.dashboard_dir).resolve()
+        if args.dashboard_dir
+        else experiment_dir / "dashboard"
+    )
+    dashboard_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_path = experiment_dir / "agent_run_summary.jsonl"
+    trajectory_path = experiment_dir / "agent_trajectories.jsonl"
+    if not summary_path.exists():
+        raise SystemExit(f"Missing summary file: {summary_path}")
+
+    summary_rows = load_jsonl(summary_path)
+    trajectory_rows = load_jsonl(trajectory_path)
+    trajectory_map = {
+        row["question_index"]: row
+        for row in trajectory_rows
+        if "question_index" in row
+    }
+
+    title = args.title or experiment_dir.name
+    payload = {
+        "meta": {
+            "title": title,
+            "experiment_dir_name": experiment_dir.name,
+            "experiment_dir": str(experiment_dir),
+            "summary_file": summary_path.name,
+            "trajectory_file": trajectory_path.name if trajectory_path.exists() else None,
+        },
+        "overview": build_overview(summary_rows),
+        "cases": build_cases(summary_rows, trajectory_map),
+    }
+
+    write_data_json(dashboard_dir, payload)
+    html_path = dashboard_dir / "index.html"
+    html_path.write_text(build_html(title), encoding="utf-8")
+
+    print(f"Dashboard written to: {html_path}")
+
+
+if __name__ == "__main__":
+    main()
