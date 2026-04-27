@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument(
         "--title",
         default=None,
-        help="Optional dashboard title. Defaults to experiment directory name.",
+        help="Optional dashboard title. Defaults to the experiment directory name.",
     )
     return parser.parse_args()
 
@@ -118,54 +118,65 @@ def build_cases(summary_rows, trajectory_map):
         attempt_records = agent_result.get("attempt_records", []) if agent_result else []
         probe_logs = agent_result.get("probe_logs", []) if agent_result else []
 
-        case = {
-            "question_index": idx,
-            "db_id": row.get("db_id"),
-            "question": row.get("question"),
-            "gold_sql": row.get("gold_sql"),
-            "final_sql": row.get("final_sql"),
-            "route": row.get("route"),
-            "is_success": row.get("is_success"),
-            "attempts": row.get("attempts"),
-            "had_reflexion": row.get("had_reflexion"),
-            "had_probe": row.get("had_probe"),
-            "probe_scenarios": row.get("probe_scenarios"),
-            "final_failure_type": row.get("final_failure_type"),
-            "final_row_count": row.get("final_row_count"),
-            "execution_time_sec": row.get("execution_time_sec"),
-            "superlative_mode": row.get("superlative_mode"),
-            "pattern_reason": row.get("pattern_reason"),
-            "pattern_template": row.get("pattern_template"),
-            "pattern_candidate_templates": row.get("pattern_candidate_templates"),
-            "pattern_router_decision": make_jsonable(row.get("pattern_router_decision")),
-            "schema_selected_tables": row.get("schema_selected_tables"),
-            "schema_seed_tables": row.get("schema_seed_tables"),
-            "schema_selected_foreign_keys": row.get("schema_selected_foreign_keys"),
-            "schema_join_paths": row.get("schema_join_paths"),
-            "schema_bridge_completion_enabled": row.get("schema_bridge_completion_enabled"),
-            "schema_bridge_anchor_tables": row.get("schema_bridge_anchor_tables"),
-            "schema_bridge_paths": row.get("schema_bridge_paths"),
-            "schema_bridge_added_tables": row.get("schema_bridge_added_tables"),
-            "schema_retrieval_explanation": make_jsonable(row.get("schema_retrieval_explanation")),
-            "schema_column_hints_enabled": row.get("schema_column_hints_enabled"),
-            "schema_column_hint_columns": row.get("schema_column_hint_columns"),
-            "schema_value_hints_enabled": row.get("schema_value_hints_enabled"),
-            "schema_value_hint_question_entities": row.get("schema_value_hint_question_entities"),
-            "schema_value_hint_entity_matches": row.get("schema_value_hint_entity_matches"),
-            "schema_value_hint_sampled_values": row.get("schema_value_hint_sampled_values"),
-            "schema_value_hint_candidate_columns": row.get("schema_value_hint_candidate_columns"),
-            "schema_table_scores_lexical": row.get("schema_table_scores_lexical"),
-            "schema_table_column_boosts": row.get("schema_table_column_boosts"),
-            "schema_column_scores": row.get("schema_column_scores"),
-            "semantic_retry_count": row.get("semantic_retry_count"),
-            "final_verifier_result": make_jsonable(row.get("final_verifier_result")),
-            "used_success_fallback": row.get("used_success_fallback"),
-            "success_fallback_reason": row.get("success_fallback_reason"),
-            "selected_success_attempt": row.get("selected_success_attempt"),
-            "attempt_records": make_jsonable(attempt_records),
-            "probe_logs": make_jsonable(probe_logs),
-        }
-        cases.append(case)
+        cases.append(
+            {
+                "question_index": idx,
+                "db_id": row.get("db_id"),
+                "question": row.get("question"),
+                "gold_sql": row.get("gold_sql"),
+                "final_sql": row.get("final_sql"),
+                "route": row.get("route"),
+                "is_success": row.get("is_success"),
+                "attempts": row.get("attempts"),
+                "had_reflexion": row.get("had_reflexion"),
+                "had_probe": row.get("had_probe"),
+                "probe_scenarios": row.get("probe_scenarios"),
+                "final_failure_type": row.get("final_failure_type"),
+                "final_row_count": row.get("final_row_count"),
+                "execution_time_sec": row.get("execution_time_sec"),
+                "superlative_mode": row.get("superlative_mode"),
+                "pattern_reason": row.get("pattern_reason"),
+                "pattern_template": row.get("pattern_template"),
+                "pattern_candidate_templates": row.get("pattern_candidate_templates"),
+                "pattern_router_decision": make_jsonable(row.get("pattern_router_decision")),
+                "schema_selected_tables": row.get("schema_selected_tables"),
+                "schema_seed_tables": row.get("schema_seed_tables"),
+                "schema_selected_foreign_keys": row.get("schema_selected_foreign_keys"),
+                "schema_join_paths": row.get("schema_join_paths"),
+                "schema_bridge_completion_enabled": row.get("schema_bridge_completion_enabled"),
+                "schema_bridge_anchor_tables": row.get("schema_bridge_anchor_tables"),
+                "schema_bridge_paths": row.get("schema_bridge_paths"),
+                "schema_bridge_added_tables": row.get("schema_bridge_added_tables"),
+                "schema_retrieval_explanation": make_jsonable(
+                    row.get("schema_retrieval_explanation")
+                ),
+                "schema_column_hints_enabled": row.get("schema_column_hints_enabled"),
+                "schema_column_hint_columns": row.get("schema_column_hint_columns"),
+                "schema_value_hints_enabled": row.get("schema_value_hints_enabled"),
+                "schema_value_hint_question_entities": row.get(
+                    "schema_value_hint_question_entities"
+                ),
+                "schema_value_hint_entity_matches": row.get(
+                    "schema_value_hint_entity_matches"
+                ),
+                "schema_value_hint_sampled_values": row.get(
+                    "schema_value_hint_sampled_values"
+                ),
+                "schema_value_hint_candidate_columns": row.get(
+                    "schema_value_hint_candidate_columns"
+                ),
+                "schema_table_scores_lexical": row.get("schema_table_scores_lexical"),
+                "schema_table_column_boosts": row.get("schema_table_column_boosts"),
+                "schema_column_scores": row.get("schema_column_scores"),
+                "semantic_retry_count": row.get("semantic_retry_count"),
+                "final_verifier_result": make_jsonable(row.get("final_verifier_result")),
+                "used_success_fallback": row.get("used_success_fallback"),
+                "success_fallback_reason": row.get("success_fallback_reason"),
+                "selected_success_attempt": row.get("selected_success_attempt"),
+                "attempt_records": make_jsonable(attempt_records),
+                "probe_logs": make_jsonable(probe_logs),
+            }
+        )
     return cases
 
 
@@ -177,13 +188,13 @@ def write_data_json(dashboard_dir: Path, payload: dict):
 
 def build_html(title: str, embedded_data_json: str):
     html = """<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>__TITLE__</title>
   <style>
-    :root {{
+    :root {
       --bg: #f6f7f9;
       --card: #ffffff;
       --ink: #1f2937;
@@ -197,63 +208,63 @@ def build_html(title: str, embedded_data_json: str):
       --bad-soft: #fee2e2;
       --warn: #92400e;
       --warn-soft: #fef3c7;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
+    }
+    * { box-sizing: border-box; }
+    body {
       margin: 0;
       font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       background: var(--bg);
       color: var(--ink);
-    }}
-    .page {{
+    }
+    .page {
       display: grid;
       grid-template-columns: 360px 1fr;
       min-height: 100vh;
-    }}
-    .sidebar {{
+    }
+    .sidebar {
       border-right: 1px solid var(--line);
       background: #fbfbfc;
       padding: 18px 16px;
       overflow-y: auto;
-    }}
-    .content {{
+    }
+    .content {
       padding: 20px;
       overflow-y: auto;
-    }}
-    h1, h2, h3 {{
+    }
+    h1, h2, h3 {
       margin: 0 0 10px;
       line-height: 1.2;
-    }}
-    .muted {{ color: var(--muted); }}
-    .card {{
+    }
+    .muted { color: var(--muted); }
+    .card {
       background: var(--card);
       border: 1px solid var(--line);
       border-radius: 14px;
       padding: 16px;
       margin-bottom: 16px;
       box-shadow: 0 4px 18px rgba(15, 23, 42, 0.04);
-    }}
-    .metrics {{
+    }
+    .metrics {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
-    }}
-    .metric {{
+    }
+    .metric {
       background: linear-gradient(180deg, #ffffff, #f8fafc);
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 12px 14px;
-    }}
-    .metric .label {{
+    }
+    .metric .label {
       font-size: 12px;
       color: var(--muted);
       margin-bottom: 6px;
-    }}
-    .metric .value {{
+    }
+    .metric .value {
       font-size: 24px;
       font-weight: 700;
-    }}
-    .pill {{
+    }
+    .pill {
       display: inline-block;
       padding: 3px 10px;
       border-radius: 999px;
@@ -262,13 +273,13 @@ def build_html(title: str, embedded_data_json: str):
       margin-right: 6px;
       margin-bottom: 6px;
       border: 1px solid transparent;
-    }}
-    .pill.ok {{ color: var(--ok); background: var(--ok-soft); }}
-    .pill.bad {{ color: var(--bad); background: var(--bad-soft); }}
-    .pill.warn {{ color: var(--warn); background: var(--warn-soft); }}
-    .pill.accent {{ color: var(--accent); background: var(--accent-soft); }}
-    .chips {{ margin-top: 6px; }}
-    input, select {{
+    }
+    .pill.ok { color: var(--ok); background: var(--ok-soft); }
+    .pill.bad { color: var(--bad); background: var(--bad-soft); }
+    .pill.warn { color: var(--warn); background: var(--warn-soft); }
+    .pill.accent { color: var(--accent); background: var(--accent-soft); }
+    .chips { margin-top: 6px; }
+    input, select {
       width: 100%;
       padding: 10px 12px;
       border-radius: 10px;
@@ -276,37 +287,37 @@ def build_html(title: str, embedded_data_json: str):
       margin-bottom: 10px;
       font: inherit;
       background: #fff;
-    }}
-    .case-list {{
+    }
+    .case-list {
       display: flex;
       flex-direction: column;
       gap: 8px;
       max-height: calc(100vh - 280px);
       overflow-y: auto;
-    }}
-    .case-item {{
+    }
+    .case-item {
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 12px;
       cursor: pointer;
       background: #fff;
-    }}
-    .case-item:hover {{ border-color: #cbd5e1; }}
-    .case-item.active {{
+    }
+    .case-item:hover { border-color: #cbd5e1; }
+    .case-item.active {
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
-    }}
-    .case-item .title {{
+    }
+    .case-item .title {
       font-size: 13px;
       font-weight: 700;
       margin-bottom: 6px;
-    }}
-    .case-item .subtitle {{
+    }
+    .case-item .subtitle {
       font-size: 12px;
       color: var(--muted);
       margin-bottom: 8px;
-    }}
-    pre {{
+    }
+    pre {
       white-space: pre-wrap;
       word-break: break-word;
       background: #0f172a;
@@ -317,47 +328,47 @@ def build_html(title: str, embedded_data_json: str):
       font-size: 12px;
       line-height: 1.5;
       margin: 0;
-    }}
-    .grid-two {{
+    }
+    .grid-two {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 16px;
-    }}
-    .kv {{
+    }
+    .kv {
       display: grid;
       grid-template-columns: 180px 1fr;
       gap: 8px;
       align-items: start;
       margin-bottom: 8px;
       font-size: 14px;
-    }}
-    .kv .k {{
+    }
+    .kv .k {
       color: var(--muted);
       font-weight: 600;
-    }}
-    .section-title {{
+    }
+    .section-title {
       margin-bottom: 10px;
       font-size: 16px;
       font-weight: 700;
-    }}
-    .table {{
+    }
+    .table {
       width: 100%;
       border-collapse: collapse;
       font-size: 13px;
-    }}
-    .table th, .table td {{
+    }
+    .table th, .table td {
       border-bottom: 1px solid var(--line);
       padding: 8px 6px;
       text-align: left;
       vertical-align: top;
-    }}
-    .small {{ font-size: 12px; }}
-    @media (max-width: 1100px) {{
-      .page {{ grid-template-columns: 1fr; }}
-      .sidebar {{ border-right: none; border-bottom: 1px solid var(--line); }}
-      .grid-two {{ grid-template-columns: 1fr; }}
-      .case-list {{ max-height: none; }}
-    }}
+    }
+    .small { font-size: 12px; }
+    @media (max-width: 1100px) {
+      .page { grid-template-columns: 1fr; }
+      .sidebar { border-right: none; border-bottom: 1px solid var(--line); }
+      .grid-two { grid-template-columns: 1fr; }
+      .case-list { max-height: none; }
+    }
   </style>
 </head>
 <body>
@@ -383,11 +394,11 @@ def build_html(title: str, embedded_data_json: str):
         </select>
         <select id="patternFilter">
           <option value="">全部 pattern 情况</option>
-          <option value="applied">只看 skill 命中</option>
-          <option value="signal">只看有 pattern signal</option>
-          <option value="fallback">只看 pattern fallback</option>
-          <option value="value">只看启用 value hints</option>
-          <option value="fallback_used">只看使用 success fallback</option>
+          <option value="applied">Skill 命中</option>
+          <option value="signal">有 pattern signal</option>
+          <option value="fallback">Pattern fallback</option>
+          <option value="value">启用 value hints</option>
+          <option value="fallback_used">使用 success fallback</option>
         </select>
       </div>
 
@@ -417,20 +428,20 @@ def build_html(title: str, embedded_data_json: str):
 
       <div class="card">
         <div class="section-title">案例详情</div>
-        <div id="caseDetail" class="muted">请选择左侧题目。</div>
+        <div id="caseDetail" class="muted">请先从左侧选择一道题。</div>
       </div>
     </main>
   </div>
 
   <script id="dashboard-data" type="application/json">__DATA__</script>
   <script>
-    const state = {{
+    const state = {
       data: null,
       filteredCases: [],
       selectedIndex: null,
-    }};
+    };
 
-    function escapeHtml(value) {{
+    function escapeHtml(value) {
       if (value === null || value === undefined) return '';
       return String(value)
         .replace(/&/g, '&amp;')
@@ -438,77 +449,77 @@ def build_html(title: str, embedded_data_json: str):
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
-    }}
+    }
 
-    function formatPercent(value) {{
+    function formatPercent(value) {
       if (value === null || value === undefined) return '-';
       return (value * 100).toFixed(1) + '%';
-    }}
+    }
 
-    function renderDictTable(obj) {{
-      const rows = Object.entries(obj || {{}});
-      if (!rows.length) return '<div class="muted">暂无数据</div>';
+    function renderDictTable(obj) {
+      const rows = Object.entries(obj || {});
+      if (!rows.length) return '<div class="muted">暂无数据。</div>';
       return `
         <table class="table">
           <thead><tr><th>项目</th><th>值</th></tr></thead>
           <tbody>
-            ${{rows.map(([k, v]) => `<tr><td>${{escapeHtml(k)}}</td><td>${{escapeHtml(typeof v === 'object' ? JSON.stringify(v) : v)}}</td></tr>`).join('')}}
+            ${rows.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : v)}</td></tr>`).join('')}
           </tbody>
         </table>
       `;
-    }}
+    }
 
-    function renderOverview() {{
+    function renderOverview() {
       const data = state.data;
       const overview = data.overview;
       document.getElementById('meta').innerHTML = `
-        实验目录：<code>${{escapeHtml(data.meta.experiment_dir_name)}}</code><br/>
-        题目数：<strong>${{overview.total_questions}}</strong>
+        实验目录：<code>${escapeHtml(data.meta.experiment_dir_name)}</code><br/>
+        题目数量：<strong>${overview.total_questions}</strong>
       `;
 
       const metrics = [
-        ['Execution Success', formatPercent(overview.execution_success_rate)],
-        ['Skill Coverage', formatPercent(overview.skill_coverage_rate)],
-        ['Pattern Signal', formatPercent(overview.pattern_signal_rate)],
-        ['Avg Attempts', overview.average_attempts],
-        ['Reflexion Rate', formatPercent(overview.had_reflexion_rate)],
-        ['Probe Rate', formatPercent(overview.had_probe_rate)],
-        ['Success Fallback', formatPercent(overview.success_fallback_rate)],
-        ['Skill Success', overview.skill_execution_success_rate === null ? '-' : formatPercent(overview.skill_execution_success_rate)],
+        ['执行成功率', formatPercent(overview.execution_success_rate)],
+        ['Skill 覆盖率', formatPercent(overview.skill_coverage_rate)],
+        ['Pattern Signal 覆盖率', formatPercent(overview.pattern_signal_rate)],
+        ['平均尝试次数', overview.average_attempts],
+        ['Reflexion 比例', formatPercent(overview.had_reflexion_rate)],
+        ['Probe 比例', formatPercent(overview.had_probe_rate)],
+        ['Success Fallback 比例', formatPercent(overview.success_fallback_rate)],
+        ['Skill 成功率', overview.skill_execution_success_rate === null ? '-' : formatPercent(overview.skill_execution_success_rate)],
       ];
 
       document.getElementById('metrics').innerHTML = metrics.map(([label, value]) => `
         <div class="metric">
-          <div class="label">${{label}}</div>
-          <div class="value">${{value}}</div>
+          <div class="label">${label}</div>
+          <div class="value">${value}</div>
         </div>
       `).join('');
 
-      document.getElementById('routeStats').innerHTML = renderDictTable({{
+      document.getElementById('routeStats').innerHTML = renderDictTable({
         ...overview.route_counts,
-        ...Object.fromEntries(Object.entries(overview.route_rates).map(([k, v]) => [`${{k}} rate`, formatPercent(v)])),
-      }});
+        ...Object.fromEntries(Object.entries(overview.route_rates).map(([k, v]) => [`${k} rate`, formatPercent(v)])),
+      });
 
-      const patternLines = {{
-        ...Object.fromEntries(Object.entries(overview.pattern_template_counts || {{}}).map(([k, v]) => [`template:${{k}}`, v])),
-        ...Object.fromEntries(Object.entries(overview.generic_pattern_reason_counts || {{}}).slice(0, 10).map(([k, v]) => [`fallback:${{k}}`, v])),
-      }};
+      const patternLines = {
+        ...Object.fromEntries(Object.entries(overview.pattern_template_counts || {}).map(([k, v]) => [`template:${k}`, v])),
+        ...Object.fromEntries(Object.entries(overview.generic_pattern_reason_counts || {}).slice(0, 10).map(([k, v]) => [`fallback:${k}`, v])),
+      };
       document.getElementById('patternStats').innerHTML = renderDictTable(patternLines);
-    }}
+    }
 
-    function getFilters() {{
-      return {{
+    function getFilters() {
+      return {
         search: document.getElementById('searchInput').value.trim().toLowerCase(),
         route: document.getElementById('routeFilter').value,
         success: document.getElementById('successFilter').value,
         pattern: document.getElementById('patternFilter').value,
-      }};
-    }}
+      };
+    }
 
-    function applyFilters() {{
+    function applyFilters() {
       const filters = getFilters();
-      const cases = state.data.cases.filter((item) => {{
-        const haystack = `${{item.question_index}} ${{item.db_id || ''}} ${{item.question || ''}}`.toLowerCase();
+      const cases = state.data.cases.filter((item) => {
+        const haystack = `${item.question_index} ${item.db_id || ''} ${item.question || ''}`.toLowerCase();
         if (filters.search && !haystack.includes(filters.search)) return false;
         if (filters.route && item.route !== filters.route) return false;
         if (filters.success && String(Boolean(item.is_success)) !== filters.success) return false;
@@ -518,174 +529,171 @@ def build_html(title: str, embedded_data_json: str):
         if (filters.pattern === 'value' && !item.schema_value_hints_enabled) return false;
         if (filters.pattern === 'fallback_used' && !item.used_success_fallback) return false;
         return true;
-      }});
+      });
       state.filteredCases = cases;
-      if (!cases.find((item) => item.question_index === state.selectedIndex)) {{
+      if (!cases.find((item) => item.question_index === state.selectedIndex)) {
         state.selectedIndex = cases.length ? cases[0].question_index : null;
-      }}
+      }
       renderCaseList();
       renderCaseDetail();
-    }}
+    }
 
-    function renderCaseList() {{
+    function renderCaseList() {
       const listEl = document.getElementById('caseList');
       const countEl = document.getElementById('caseCount');
-      countEl.textContent = `当前筛选：${{state.filteredCases.length}} 题`;
-      if (!state.filteredCases.length) {{
+      countEl.textContent = `当前筛选结果：${state.filteredCases.length} 题`;
+      if (!state.filteredCases.length) {
         listEl.innerHTML = '<div class="muted">没有匹配的题目。</div>';
         return;
-      }}
-      listEl.innerHTML = state.filteredCases.map((item) => {{
+      }
+      listEl.innerHTML = state.filteredCases.map((item) => {
         const active = item.question_index === state.selectedIndex ? 'active' : '';
         const pills = [
-          `<span class="pill ${{item.is_success ? 'ok' : 'bad'}}">${{item.is_success ? 'success' : 'failure'}}</span>`,
-          `<span class="pill accent">${{escapeHtml(item.route || 'unknown')}}</span>`,
+          `<span class="pill ${item.is_success ? 'ok' : 'bad'}">${item.is_success ? 'success' : 'failure'}</span>`,
+          `<span class="pill accent">${escapeHtml(item.route || 'unknown')}</span>`,
         ];
-        if (item.pattern_template) pills.push(`<span class="pill warn">${{escapeHtml(item.pattern_template)}}</span>`);
+        if (item.pattern_template) pills.push(`<span class="pill warn">${escapeHtml(item.pattern_template)}</span>`);
         if (item.used_success_fallback) pills.push('<span class="pill warn">fallback</span>');
         return `
-          <div class="case-item ${{active}}" data-case-id="${{item.question_index}}">
-            <div class="title">#${{item.question_index}} · ${{escapeHtml(item.db_id || '')}}</div>
-            <div class="subtitle">${{escapeHtml((item.question || '').slice(0, 90))}}</div>
-            <div class="chips">${{pills.join('')}}</div>
+          <div class="case-item ${active}" data-case-id="${item.question_index}">
+            <div class="title">#${item.question_index} · ${escapeHtml(item.db_id || '')}</div>
+            <div class="subtitle">${escapeHtml((item.question || '').slice(0, 90))}</div>
+            <div class="chips">${pills.join('')}</div>
           </div>
         `;
-      }}).join('');
+      }).join('');
 
-      listEl.querySelectorAll('.case-item').forEach((node) => {{
-        node.addEventListener('click', () => {{
+      listEl.querySelectorAll('.case-item').forEach((node) => {
+        node.addEventListener('click', () => {
           state.selectedIndex = Number(node.dataset.caseId);
           renderCaseList();
           renderCaseDetail();
-        }});
-      }});
-    }}
+        });
+      });
+    }
 
-    function buildKvRows(rows) {{
-      return rows.map(([k, v]) => `<div class="kv"><div class="k">${{escapeHtml(k)}}</div><div>${{escapeHtml(v)}}</div></div>`).join('');
-    }}
+    function buildKvRows(rows) {
+      return rows.map(([k, v]) => `<div class="kv"><div class="k">${escapeHtml(k)}</div><div>${escapeHtml(v)}</div></div>`).join('');
+    }
 
-    function asPrettyJson(value) {{
+    function asPrettyJson(value) {
       return escapeHtml(JSON.stringify(value ?? null, null, 2));
-    }}
+    }
 
-    function renderCaseDetail() {{
+    function renderCaseDetail() {
       const detail = document.getElementById('caseDetail');
       const item = state.filteredCases.find((row) => row.question_index === state.selectedIndex);
-      if (!item) {{
+      if (!item) {
         detail.innerHTML = '<div class="muted">当前筛选条件下没有题目。</div>';
         return;
-      }}
+      }
 
       const summaryRows = [
-        ['Question Index', item.question_index],
-        ['DB', item.db_id],
+        ['题号', item.question_index],
+        ['数据库', item.db_id],
         ['Route', item.route],
         ['Pattern Template', item.pattern_template || '-'],
         ['Pattern Reason', item.pattern_reason || '-'],
-        ['Success', item.is_success],
-        ['Attempts', item.attempts],
-        ['Had Reflexion', item.had_reflexion],
-        ['Had Probe', item.had_probe],
-        ['Semantic Retries', item.semantic_retry_count],
-        ['Success Fallback', item.used_success_fallback],
-        ['Fallback Reason', item.success_fallback_reason || '-'],
-        ['Execution Time (s)', item.execution_time_sec ?? '-'],
-        ['Row Count', item.final_row_count ?? '-'],
+        ['是否成功', item.is_success],
+        ['尝试次数', item.attempts],
+        ['是否触发 Reflexion', item.had_reflexion],
+        ['是否触发 Probe', item.had_probe],
+        ['语义重试次数', item.semantic_retry_count],
+        ['是否使用 Success Fallback', item.used_success_fallback],
+        ['Fallback 原因', item.success_fallback_reason || '-'],
+        ['执行时间（秒）', item.execution_time_sec ?? '-'],
+        ['结果行数', item.final_row_count ?? '-'],
       ];
 
       detail.innerHTML = `
         <div class="card">
           <div class="section-title">问题与结果</div>
-          <div class="kv"><div class="k">Question</div><div>${{escapeHtml(item.question || '')}}</div></div>
-          <div class="kv"><div class="k">Gold SQL</div><div><pre>${{escapeHtml(item.gold_sql || '')}}</pre></div></div>
-          <div class="kv"><div class="k">Final SQL</div><div><pre>${{escapeHtml(item.final_sql || '')}}</pre></div></div>
-          ${{buildKvRows(summaryRows)}}
+          <div class="kv"><div class="k">问题</div><div>${escapeHtml(item.question || '')}</div></div>
+          <div class="kv"><div class="k">Gold SQL</div><div><pre>${escapeHtml(item.gold_sql || '')}</pre></div></div>
+          <div class="kv"><div class="k">Final SQL</div><div><pre>${escapeHtml(item.final_sql || '')}</pre></div></div>
+          ${buildKvRows(summaryRows)}
         </div>
 
         <div class="grid-two">
           <div class="card">
             <div class="section-title">Retrieval</div>
-            <div class="kv"><div class="k">Seed Tables</div><div><pre>${{asPrettyJson(item.schema_seed_tables || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Selected Tables</div><div><pre>${{asPrettyJson(item.schema_selected_tables || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Selected FKs</div><div><pre>${{asPrettyJson(item.schema_selected_foreign_keys || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Join Paths</div><div><pre>${{asPrettyJson(item.schema_join_paths || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Explanation</div><div><pre>${{asPrettyJson(item.schema_retrieval_explanation || {{}})}}</pre></div></div>
+            <div class="kv"><div class="k">Seed Tables</div><div><pre>${asPrettyJson(item.schema_seed_tables || [])}</pre></div></div>
+            <div class="kv"><div class="k">Selected Tables</div><div><pre>${asPrettyJson(item.schema_selected_tables || [])}</pre></div></div>
+            <div class="kv"><div class="k">Selected FKs</div><div><pre>${asPrettyJson(item.schema_selected_foreign_keys || [])}</pre></div></div>
+            <div class="kv"><div class="k">Join Paths</div><div><pre>${asPrettyJson(item.schema_join_paths || [])}</pre></div></div>
+            <div class="kv"><div class="k">Explanation</div><div><pre>${asPrettyJson(item.schema_retrieval_explanation || {})}</pre></div></div>
           </div>
 
           <div class="card">
             <div class="section-title">Value Grounding</div>
-            <div class="kv"><div class="k">Value Hints Enabled</div><div>${{escapeHtml(item.schema_value_hints_enabled)}}</div></div>
-            <div class="kv"><div class="k">Question Entities</div><div><pre>${{asPrettyJson(item.schema_value_hint_question_entities || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Entity Matches</div><div><pre>${{asPrettyJson(item.schema_value_hint_entity_matches || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Sampled Values</div><div><pre>${{asPrettyJson(item.schema_value_hint_sampled_values || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Candidate Columns</div><div><pre>${{asPrettyJson(item.schema_value_hint_candidate_columns || [])}}</pre></div></div>
+            <div class="kv"><div class="k">是否启用 Value Hints</div><div>${escapeHtml(item.schema_value_hints_enabled)}</div></div>
+            <div class="kv"><div class="k">问题实体</div><div><pre>${asPrettyJson(item.schema_value_hint_question_entities || [])}</pre></div></div>
+            <div class="kv"><div class="k">实体匹配</div><div><pre>${asPrettyJson(item.schema_value_hint_entity_matches || [])}</pre></div></div>
+            <div class="kv"><div class="k">采样值</div><div><pre>${asPrettyJson(item.schema_value_hint_sampled_values || [])}</pre></div></div>
+            <div class="kv"><div class="k">候选列</div><div><pre>${asPrettyJson(item.schema_value_hint_candidate_columns || [])}</pre></div></div>
           </div>
         </div>
 
         <div class="grid-two">
           <div class="card">
             <div class="section-title">Pattern / Skill Route</div>
-            <div class="kv"><div class="k">Candidate Templates</div><div><pre>${{asPrettyJson(item.pattern_candidate_templates || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Router Decision</div><div><pre>${{asPrettyJson(item.pattern_router_decision || {{}})}}</pre></div></div>
+            <div class="kv"><div class="k">候选模板</div><div><pre>${asPrettyJson(item.pattern_candidate_templates || [])}</pre></div></div>
+            <div class="kv"><div class="k">路由决策</div><div><pre>${asPrettyJson(item.pattern_router_decision || {})}</pre></div></div>
           </div>
 
           <div class="card">
             <div class="section-title">Verifier / Fallback</div>
-            <div class="kv"><div class="k">Final Verifier Result</div><div><pre>${{asPrettyJson(item.final_verifier_result || {{}})}}</pre></div></div>
-            <div class="kv"><div class="k">Used Success Fallback</div><div>${{escapeHtml(item.used_success_fallback)}}</div></div>
-            <div class="kv"><div class="k">Selected Success Attempt</div><div>${{escapeHtml(item.selected_success_attempt ?? '-')}}</div></div>
+            <div class="kv"><div class="k">最终 Verifier 结果</div><div><pre>${asPrettyJson(item.final_verifier_result || {})}</pre></div></div>
+            <div class="kv"><div class="k">是否使用 Success Fallback</div><div>${escapeHtml(item.used_success_fallback)}</div></div>
+            <div class="kv"><div class="k">选中的成功尝试</div><div>${escapeHtml(item.selected_success_attempt ?? '-')}</div></div>
           </div>
         </div>
 
         <div class="grid-two">
           <div class="card">
             <div class="section-title">Column Signals</div>
-            <div class="kv"><div class="k">Column Hints Enabled</div><div>${{escapeHtml(item.schema_column_hints_enabled)}}</div></div>
-            <div class="kv"><div class="k">Hint Columns</div><div><pre>${{asPrettyJson(item.schema_column_hint_columns || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Table Lexical Scores</div><div><pre>${{asPrettyJson(item.schema_table_scores_lexical || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Table Column Boosts</div><div><pre>${{asPrettyJson(item.schema_table_column_boosts || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Column Scores</div><div><pre>${{asPrettyJson(item.schema_column_scores || [])}}</pre></div></div>
+            <div class="kv"><div class="k">是否启用 Column Hints</div><div>${escapeHtml(item.schema_column_hints_enabled)}</div></div>
+            <div class="kv"><div class="k">Hint 列</div><div><pre>${asPrettyJson(item.schema_column_hint_columns || [])}</pre></div></div>
+            <div class="kv"><div class="k">表词面分数</div><div><pre>${asPrettyJson(item.schema_table_scores_lexical || [])}</pre></div></div>
+            <div class="kv"><div class="k">列增益分数</div><div><pre>${asPrettyJson(item.schema_table_column_boosts || [])}</pre></div></div>
+            <div class="kv"><div class="k">列分数</div><div><pre>${asPrettyJson(item.schema_column_scores || [])}</pre></div></div>
           </div>
 
           <div class="card">
             <div class="section-title">Attempts / Probe Logs</div>
-            <div class="kv"><div class="k">Attempt Records</div><div><pre>${{asPrettyJson(item.attempt_records || [])}}</pre></div></div>
-            <div class="kv"><div class="k">Probe Logs</div><div><pre>${{asPrettyJson(item.probe_logs || [])}}</pre></div></div>
+            <div class="kv"><div class="k">尝试记录</div><div><pre>${asPrettyJson(item.attempt_records || [])}</pre></div></div>
+            <div class="kv"><div class="k">Probe 日志</div><div><pre>${asPrettyJson(item.probe_logs || [])}</pre></div></div>
           </div>
         </div>
       `;
-    }}
+    }
 
-    function bootstrap() {{
+    function bootstrap() {
       const embedded = document.getElementById('dashboard-data');
-      if (!embedded || !embedded.textContent.trim()) {{
+      if (!embedded || !embedded.textContent.trim()) {
         throw new Error('Embedded dashboard data is missing.');
-      }}
+      }
       state.data = JSON.parse(embedded.textContent);
       renderOverview();
 
-      ['searchInput', 'routeFilter', 'successFilter', 'patternFilter'].forEach((id) => {{
+      ['searchInput', 'routeFilter', 'successFilter', 'patternFilter'].forEach((id) => {
         document.getElementById(id).addEventListener('input', applyFilters);
         document.getElementById(id).addEventListener('change', applyFilters);
-      }});
+      });
 
       applyFilters();
-    }}
+    }
 
-    bootstrap().catch((err) => {{
-      document.getElementById('caseDetail').innerHTML = `<pre>${{escapeHtml(String(err))}}</pre>`;
-    }});
+    try {
+      bootstrap();
+    } catch (err) {
+      document.getElementById('caseDetail').innerHTML = `<pre>${escapeHtml(String(err))}</pre>`;
+    }
   </script>
 </body>
 </html>
 """
-    return (
-        html.replace("__TITLE__", title)
-        .replace("__DATA__", embedded_data_json)
-        .replace("{{", "{")
-        .replace("}}", "}")
-    )
+    return html.replace("__TITLE__", title).replace("__DATA__", embedded_data_json)
 
 
 def main():
@@ -706,9 +714,7 @@ def main():
     summary_rows = load_jsonl(summary_path)
     trajectory_rows = load_jsonl(trajectory_path)
     trajectory_map = {
-        row["question_index"]: row
-        for row in trajectory_rows
-        if "question_index" in row
+        row["question_index"]: row for row in trajectory_rows if "question_index" in row
     }
 
     title = args.title or experiment_dir.name
