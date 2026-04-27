@@ -362,6 +362,48 @@ def build_html(title: str, embedded_data_json: str):
       text-align: left;
       vertical-align: top;
     }
+    .tag-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .tag {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: #eef2ff;
+      color: #374151;
+      border: 1px solid #dbe3f4;
+    }
+    .stack {
+      display: grid;
+      gap: 10px;
+    }
+    .mini-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: #fafafa;
+    }
+    .mini-card-title {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+    details {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      padding: 8px 10px;
+    }
+    details summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: var(--muted);
+      outline: none;
+    }
     .small { font-size: 12px; }
     @media (max-width: 1100px) {
       .page { grid-template-columns: 1fr; }
@@ -580,6 +622,149 @@ def build_html(title: str, embedded_data_json: str):
       return escapeHtml(JSON.stringify(value ?? null, null, 2));
     }
 
+    function renderTagList(items, emptyText = '暂无') {
+      const values = Array.isArray(items) ? items : [];
+      if (!values.length) return `<div class="muted">${escapeHtml(emptyText)}</div>`;
+      return `<div class="tag-list">${values.map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join('')}</div>`;
+    }
+
+    function renderStringList(items, emptyText = '暂无') {
+      const values = Array.isArray(items) ? items : [];
+      if (!values.length) return `<div class="muted">${escapeHtml(emptyText)}</div>`;
+      return `<div class="stack">${values.map((item) => `<div class="mini-card">${escapeHtml(item)}</div>`).join('')}</div>`;
+    }
+
+    function renderFkTable(items) {
+      const values = Array.isArray(items) ? items : [];
+      if (!values.length) return '<div class="muted">暂无外键信息。</div>';
+      return `
+        <table class="table">
+          <thead><tr><th>源表.列</th><th>目标表.列</th></tr></thead>
+          <tbody>
+            ${values.map((item) => `
+              <tr>
+                <td>${escapeHtml(`${item.source_table || ''}.${item.source_column || ''}`)}</td>
+                <td>${escapeHtml(`${item.target_table || ''}.${item.target_column || ''}`)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function renderEntityMatches(items) {
+      const values = Array.isArray(items) ? items : [];
+      if (!values.length) return '<div class="muted">没有实体匹配。</div>';
+      return `
+        <table class="table">
+          <thead><tr><th>值</th><th>候选列</th><th>分数</th></tr></thead>
+          <tbody>
+            ${values.map((item) => `
+              <tr>
+                <td>${escapeHtml(item.value ?? item.entity ?? '-')}</td>
+                <td>${escapeHtml(item.column ? `${item.table || ''}.${item.column}` : (item.target || '-'))}</td>
+                <td>${escapeHtml(item.score ?? '-')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function renderSampledValues(items) {
+      const values = Array.isArray(items) ? items : [];
+      if (!values.length) return '<div class="muted">没有采样值。</div>';
+      return `
+        <div class="stack">
+          ${values.map((item) => `
+            <div class="mini-card">
+              <div class="mini-card-title">${escapeHtml(`${item.table || ''}.${item.column || ''}`)}</div>
+              ${renderTagList(item.values || [], '无采样值')}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function renderCandidateColumns(items) {
+      const values = Array.isArray(items) ? items : [];
+      if (!values.length) return '<div class="muted">没有候选列。</div>';
+      return `
+        <table class="table">
+          <thead><tr><th>列</th><th>分数</th></tr></thead>
+          <tbody>
+            ${values.map((item) => `
+              <tr>
+                <td>${escapeHtml(`${item.table || ''}.${item.column || ''}`)}</td>
+                <td>${escapeHtml(item.score ?? '-')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function renderRouterDecision(decision) {
+      if (!decision || typeof decision !== 'object') {
+        return '<div class="muted">没有路由决策信息。</div>';
+      }
+      const rows = [
+        ['selected_template', decision.selected_template ?? '-'],
+        ['use_template_score', decision.use_template_score ?? '-'],
+        ['selected_template_score', decision.selected_template_score ?? '-'],
+        ['route_score', decision.route_score ?? '-'],
+        ['reason', decision.reason ?? '-'],
+      ];
+      return `
+        ${buildKvRows(rows)}
+        <details>
+          <summary>展开原始路由 JSON</summary>
+          <pre>${asPrettyJson(decision)}</pre>
+        </details>
+      `;
+    }
+
+    function renderVerifier(verifier) {
+      if (!verifier || typeof verifier !== 'object') {
+        return '<div class="muted">没有 verifier 信息。</div>';
+      }
+      const flags = Array.isArray(verifier.risk_flags) ? verifier.risk_flags : [];
+      const hints = Array.isArray(verifier.repair_hints) ? verifier.repair_hints : [];
+      return `
+        ${buildKvRows([
+          ['score', verifier.score ?? '-'],
+          ['should_retry', verifier.should_retry ?? '-'],
+        ])}
+        <div class="mini-card" style="margin-bottom:10px;">
+          <div class="mini-card-title">Risk Flags</div>
+          ${flags.length ? renderDictTable(Object.fromEntries(flags.map((f, i) => [`${i + 1}. ${f.type || 'flag'}`, `${f.severity || '-'} | ${f.message || '-'}`]))) : '<div class="muted">没有风险标记。</div>'}
+        </div>
+        <div class="mini-card">
+          <div class="mini-card-title">Repair Hints</div>
+          ${renderStringList(hints, '没有修复提示。')}
+        </div>
+      `;
+    }
+
+    function renderRetrievalExplanation(explanation) {
+      if (!explanation || typeof explanation !== 'object') {
+        return '<div class="muted">没有 explanation 信息。</div>';
+      }
+      const tableRationales = Array.isArray(explanation.table_rationales) ? explanation.table_rationales : [];
+      const ambiguities = Array.isArray(explanation.ambiguities) ? explanation.ambiguities : [];
+      return `
+        ${buildKvRows([
+          ['confidence', explanation.confidence ?? '-'],
+          ['table rationales', tableRationales.length],
+          ['ambiguities', ambiguities.length],
+        ])}
+        <details>
+          <summary>展开 explanation 详情</summary>
+          <pre>${asPrettyJson(explanation)}</pre>
+        </details>
+      `;
+    }
+
     function renderCaseDetail() {
       const detail = document.getElementById('caseDetail');
       const item = state.filteredCases.find((row) => row.question_index === state.selectedIndex);
@@ -617,33 +802,33 @@ def build_html(title: str, embedded_data_json: str):
         <div class="grid-two">
           <div class="card">
             <div class="section-title">Retrieval</div>
-            <div class="kv"><div class="k">Seed Tables</div><div><pre>${asPrettyJson(item.schema_seed_tables || [])}</pre></div></div>
-            <div class="kv"><div class="k">Selected Tables</div><div><pre>${asPrettyJson(item.schema_selected_tables || [])}</pre></div></div>
-            <div class="kv"><div class="k">Selected FKs</div><div><pre>${asPrettyJson(item.schema_selected_foreign_keys || [])}</pre></div></div>
-            <div class="kv"><div class="k">Join Paths</div><div><pre>${asPrettyJson(item.schema_join_paths || [])}</pre></div></div>
-            <div class="kv"><div class="k">Explanation</div><div><pre>${asPrettyJson(item.schema_retrieval_explanation || {})}</pre></div></div>
+            <div class="kv"><div class="k">Seed Tables</div><div>${renderTagList(item.schema_seed_tables || [], '没有 seed tables')}</div></div>
+            <div class="kv"><div class="k">Selected Tables</div><div>${renderTagList(item.schema_selected_tables || [], '没有 selected tables')}</div></div>
+            <div class="kv"><div class="k">Selected FKs</div><div>${renderFkTable(item.schema_selected_foreign_keys || [])}</div></div>
+            <div class="kv"><div class="k">Join Paths</div><div>${renderStringList(item.schema_join_paths || [], '没有 join path')}</div></div>
+            <div class="kv"><div class="k">Explanation</div><div>${renderRetrievalExplanation(item.schema_retrieval_explanation || {})}</div></div>
           </div>
 
           <div class="card">
             <div class="section-title">Value Grounding</div>
             <div class="kv"><div class="k">是否启用 Value Hints</div><div>${escapeHtml(item.schema_value_hints_enabled)}</div></div>
-            <div class="kv"><div class="k">问题实体</div><div><pre>${asPrettyJson(item.schema_value_hint_question_entities || [])}</pre></div></div>
-            <div class="kv"><div class="k">实体匹配</div><div><pre>${asPrettyJson(item.schema_value_hint_entity_matches || [])}</pre></div></div>
-            <div class="kv"><div class="k">采样值</div><div><pre>${asPrettyJson(item.schema_value_hint_sampled_values || [])}</pre></div></div>
-            <div class="kv"><div class="k">候选列</div><div><pre>${asPrettyJson(item.schema_value_hint_candidate_columns || [])}</pre></div></div>
+            <div class="kv"><div class="k">问题实体</div><div>${renderTagList(item.schema_value_hint_question_entities || [], '没有识别到实体')}</div></div>
+            <div class="kv"><div class="k">实体匹配</div><div>${renderEntityMatches(item.schema_value_hint_entity_matches || [])}</div></div>
+            <div class="kv"><div class="k">采样值</div><div>${renderSampledValues(item.schema_value_hint_sampled_values || [])}</div></div>
+            <div class="kv"><div class="k">候选列</div><div>${renderCandidateColumns(item.schema_value_hint_candidate_columns || [])}</div></div>
           </div>
         </div>
 
         <div class="grid-two">
           <div class="card">
             <div class="section-title">Pattern / Skill Route</div>
-            <div class="kv"><div class="k">候选模板</div><div><pre>${asPrettyJson(item.pattern_candidate_templates || [])}</pre></div></div>
-            <div class="kv"><div class="k">路由决策</div><div><pre>${asPrettyJson(item.pattern_router_decision || {})}</pre></div></div>
+            <div class="kv"><div class="k">候选模板</div><div>${renderTagList(item.pattern_candidate_templates || [], '没有候选模板')}</div></div>
+            <div class="kv"><div class="k">路由决策</div><div>${renderRouterDecision(item.pattern_router_decision || {})}</div></div>
           </div>
 
           <div class="card">
             <div class="section-title">Verifier / Fallback</div>
-            <div class="kv"><div class="k">最终 Verifier 结果</div><div><pre>${asPrettyJson(item.final_verifier_result || {})}</pre></div></div>
+            <div class="kv"><div class="k">最终 Verifier 结果</div><div>${renderVerifier(item.final_verifier_result || {})}</div></div>
             <div class="kv"><div class="k">是否使用 Success Fallback</div><div>${escapeHtml(item.used_success_fallback)}</div></div>
             <div class="kv"><div class="k">选中的成功尝试</div><div>${escapeHtml(item.selected_success_attempt ?? '-')}</div></div>
           </div>
@@ -653,16 +838,16 @@ def build_html(title: str, embedded_data_json: str):
           <div class="card">
             <div class="section-title">Column Signals</div>
             <div class="kv"><div class="k">是否启用 Column Hints</div><div>${escapeHtml(item.schema_column_hints_enabled)}</div></div>
-            <div class="kv"><div class="k">Hint 列</div><div><pre>${asPrettyJson(item.schema_column_hint_columns || [])}</pre></div></div>
-            <div class="kv"><div class="k">表词面分数</div><div><pre>${asPrettyJson(item.schema_table_scores_lexical || [])}</pre></div></div>
-            <div class="kv"><div class="k">列增益分数</div><div><pre>${asPrettyJson(item.schema_table_column_boosts || [])}</pre></div></div>
-            <div class="kv"><div class="k">列分数</div><div><pre>${asPrettyJson(item.schema_column_scores || [])}</pre></div></div>
+            <div class="kv"><div class="k">Hint 列</div><div>${renderTagList((item.schema_column_hint_columns || []).map((x) => x.table && x.column ? `${x.table}.${x.column}` : JSON.stringify(x)), '没有 hint 列')}</div></div>
+            <div class="kv"><div class="k">表词面分数</div><div><details><summary>展开表词面分数</summary><pre>${asPrettyJson(item.schema_table_scores_lexical || [])}</pre></details></div></div>
+            <div class="kv"><div class="k">列增益分数</div><div><details><summary>展开列增益分数</summary><pre>${asPrettyJson(item.schema_table_column_boosts || [])}</pre></details></div></div>
+            <div class="kv"><div class="k">列分数</div><div><details><summary>展开列分数</summary><pre>${asPrettyJson(item.schema_column_scores || [])}</pre></details></div></div>
           </div>
 
           <div class="card">
             <div class="section-title">Attempts / Probe Logs</div>
-            <div class="kv"><div class="k">尝试记录</div><div><pre>${asPrettyJson(item.attempt_records || [])}</pre></div></div>
-            <div class="kv"><div class="k">Probe 日志</div><div><pre>${asPrettyJson(item.probe_logs || [])}</pre></div></div>
+            <div class="kv"><div class="k">尝试记录</div><div><details><summary>展开尝试记录</summary><pre>${asPrettyJson(item.attempt_records || [])}</pre></details></div></div>
+            <div class="kv"><div class="k">Probe 日志</div><div><details><summary>展开 Probe 日志</summary><pre>${asPrettyJson(item.probe_logs || [])}</pre></details></div></div>
           </div>
         </div>
       `;
