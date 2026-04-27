@@ -129,7 +129,7 @@ def tokenize(string):
         string = string[:qidx1] + key + string[qidx2+1:]
         vals[key] = val
 
-    toks = [word.lower() for word in word_tokenize(string)]
+    toks = [word.lower() for word in word_tokenize(string, preserve_line=True)]
     # replace with string value token
     for i in range(len(toks)):
         if toks[i] in vals:

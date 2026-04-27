@@ -6,6 +6,10 @@ from retrieval.schema_retriever import (
     SchemaRetriever,
     build_schema_metadata_dict,
 )
+from spider_eval.evaluation import (
+    build_foreign_key_map_from_json,
+    evaluate as spider_evaluate,
+)
 from superlative.profiles import FINAL_SUPERLATIVE_MODE
 FINAL_BASELINE_SUPERLATIVE_MODE = FINAL_SUPERLATIVE_MODE
 FINAL_BASELINE_SCHEMA_MODE = "rag"
@@ -83,16 +87,88 @@ def should_archive_trajectory(agent_result: dict) -> bool:
     return agent_result.get("attempts", 1) > 1 or agent_result.get("had_probe", False)
 
 
+def build_metrics_payload(scores: dict) -> dict:
+    tracked_levels = ["easy", "medium", "hard", "extra", "all"]
+    difficulty_breakdown = {}
+    exact_breakdown = {}
+    count_breakdown = {}
+
+    for level in tracked_levels:
+        level_scores = scores.get(level, {})
+        difficulty_breakdown[level] = level_scores.get("exec")
+        exact_breakdown[level] = level_scores.get("exact")
+        count_breakdown[level] = level_scores.get("count")
+
+    return {
+        "execution_accuracy": scores.get("all", {}).get("exec"),
+        "exact_match_accuracy": scores.get("all", {}).get("exact"),
+        "difficulty_breakdown": difficulty_breakdown,
+        "exact_breakdown": exact_breakdown,
+        "count": count_breakdown,
+    }
+
+
+def write_official_metrics_if_possible(args, total_count: int, predict_path: Path, metrics_path: Path) -> bool:
+    gold_path = Path(args.gold_path)
+    tables_path = Path(args.tables_path)
+    db_root = Path(args.db_root)
+
+    if args.end_index is not None and args.end_index != total_count:
+        print(">>> 本次不是全量评测，跳过 metrics.json 生成。")
+        return False
+    if args.start_index != 0 and not args.resume:
+        print(">>> 本次从中间题号开始且非 resume，跳过 metrics.json 生成。")
+        return False
+    if not predict_path.exists():
+        print(f">>> 未找到预测文件，无法生成 metrics.json: {predict_path}")
+        return False
+    if count_existing_lines(predict_path) != total_count:
+        print(">>> 预测文件行数与题目总数不一致，跳过 metrics.json 生成。")
+        return False
+    if not gold_path.exists():
+        print(f">>> 未找到 gold 文件，跳过 metrics.json 生成: {gold_path}")
+        return False
+    if not tables_path.exists():
+        print(f">>> 未找到 tables.json，跳过 metrics.json 生成: {tables_path}")
+        return False
+    if not db_root.exists():
+        print(f">>> 未找到数据库目录，跳过 metrics.json 生成: {db_root}")
+        return False
+
+    print(">>> 正在计算 Spider 官方 EX / Exact 指标...")
+    try:
+        kmaps = build_foreign_key_map_from_json(str(tables_path))
+        scores = spider_evaluate(
+            str(gold_path),
+            str(predict_path),
+            str(db_root),
+            "all",
+            kmaps,
+            False,
+            False,
+            False,
+        )
+        metrics_payload = build_metrics_payload(scores)
+        with metrics_path.open("w", encoding="utf-8") as f:
+            json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as exc:
+        print(f">>> 官方评测指标生成失败：{exc}")
+        return False
+
+
 def add_common_args(parser):
     parser.add_argument("--base-model", required=True, help="基座模型路径")
     parser.add_argument("--lora-path", default=None, help="LoRA 权重路径，可为空")
     parser.add_argument("--dev-path", default="data/dev.json", help="Spider dev.json 路径")
+    parser.add_argument("--gold-path", default="data/dev_gold.sql", help="Spider dev_gold.sql 路径")
     parser.add_argument("--tables-path", default="data/tables.json", help="Spider tables.json 路径")
     parser.add_argument("--db-root", default="data/testsuitedatabases/database", help="Spider 数据库根目录")
     parser.add_argument("--output-dir", default="eval", help="评测输出目录")
     parser.add_argument("--predict-file", default="predict_agent.txt", help="Spider 官方评测用预测文件名")
     parser.add_argument("--summary-file", default="agent_run_summary.jsonl", help="轻量摘要日志文件名")
     parser.add_argument("--trajectory-file", default="agent_trajectories.jsonl", help="完整轨迹日志文件名")
+    parser.add_argument("--metrics-file", default="metrics.json", help="官方评测指标输出文件名")
     parser.add_argument("--max-retries", type=int, default=3, help="Agent 最大重试轮数")
     parser.add_argument(
         "--entrypoint",
@@ -156,6 +232,7 @@ def run_evaluation():
     predict_path = output_dir / args.predict_file
     summary_path = output_dir / args.summary_file
     trajectory_path = output_dir / args.trajectory_file
+    metrics_path = output_dir / args.metrics_file
 
     print(">>> 正在加载 Spider 配置与题目集...")
     schema_meta_dict = build_schema_metadata_dict(tables_path)
@@ -423,6 +500,13 @@ def run_evaluation():
     print(f">>> 预测文件: {predict_path}")
     print(f">>> 摘要日志: {summary_path}")
     print(f">>> 轨迹日志: {trajectory_path}")
+    if write_official_metrics_if_possible(
+        args=args,
+        total_count=total_count,
+        predict_path=predict_path,
+        metrics_path=metrics_path,
+    ):
+        print(f">>> 官方评测指标: {metrics_path}")
 
 
 if __name__ == "__main__":

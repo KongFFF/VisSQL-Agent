@@ -38,6 +38,13 @@ def load_jsonl(path: Path):
     return rows
 
 
+def load_json(path: Path):
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def make_jsonable(value):
     if isinstance(value, dict):
         return {str(k): make_jsonable(v) for k, v in value.items()}
@@ -46,7 +53,7 @@ def make_jsonable(value):
     return value
 
 
-def build_overview(summary_rows):
+def build_overview(summary_rows, metrics=None):
     total = len(summary_rows)
     if total == 0:
         return {}
@@ -80,6 +87,7 @@ def build_overview(summary_rows):
 
     return {
         "total_questions": total,
+        "official_metrics": metrics,
         "execution_success_count": success_count,
         "execution_success_rate": round(success_count / total, 4),
         "average_attempts": round(avg_attempts, 3),
@@ -103,9 +111,7 @@ def build_overview(summary_rows):
         else None,
         "pattern_template_counts": dict(pattern_template_counts),
         "pattern_reason_counts": dict(pattern_reason_counts),
-        "generic_pattern_reason_counts": dict(
-            Counter(row.get("pattern_reason") for row in generic_pattern_rows)
-        ),
+        "generic_pattern_reason_counts": dict(Counter(row.get("pattern_reason") for row in generic_pattern_rows)),
     }
 
 
@@ -514,21 +520,33 @@ def build_html(title: str, embedded_data_json: str):
     function renderOverview() {
       const data = state.data;
       const overview = data.overview;
+      const official = overview.official_metrics || null;
       document.getElementById('meta').innerHTML = `
         实验目录：<code>${escapeHtml(data.meta.experiment_dir_name)}</code><br/>
         题目数量：<strong>${overview.total_questions}</strong>
       `;
 
-      const metrics = [
-        ['执行成功率', formatPercent(overview.execution_success_rate)],
+      const metrics = [];
+      if (official) {
+        metrics.push(
+          ['官方 EX 准确率', official.execution_accuracy == null ? '-' : formatPercent(official.execution_accuracy)],
+          ['官方 Exact 准确率', official.exact_match_accuracy == null ? '-' : formatPercent(official.exact_match_accuracy)],
+          ['Easy EX', official.difficulty_breakdown?.easy == null ? '-' : formatPercent(official.difficulty_breakdown.easy)],
+          ['Medium EX', official.difficulty_breakdown?.medium == null ? '-' : formatPercent(official.difficulty_breakdown.medium)],
+          ['Hard EX', official.difficulty_breakdown?.hard == null ? '-' : formatPercent(official.difficulty_breakdown.hard)],
+          ['Extra EX', official.difficulty_breakdown?.extra == null ? '-' : formatPercent(official.difficulty_breakdown.extra)],
+        );
+      }
+      metrics.push(
+        ['SQL 运行成功率', formatPercent(overview.execution_success_rate)],
         ['Skill 覆盖率', formatPercent(overview.skill_coverage_rate)],
         ['Pattern Signal 覆盖率', formatPercent(overview.pattern_signal_rate)],
         ['平均尝试次数', overview.average_attempts],
         ['Reflexion 比例', formatPercent(overview.had_reflexion_rate)],
         ['Probe 比例', formatPercent(overview.had_probe_rate)],
         ['Success Fallback 比例', formatPercent(overview.success_fallback_rate)],
-        ['Skill 成功率', overview.skill_execution_success_rate === null ? '-' : formatPercent(overview.skill_execution_success_rate)],
-      ];
+        ['Skill 运行成功率', overview.skill_execution_success_rate === null ? '-' : formatPercent(overview.skill_execution_success_rate)],
+      );
 
       document.getElementById('metrics').innerHTML = metrics.map(([label, value]) => `
         <div class="metric">
@@ -893,11 +911,13 @@ def main():
 
     summary_path = experiment_dir / "agent_run_summary.jsonl"
     trajectory_path = experiment_dir / "agent_trajectories.jsonl"
+    metrics_path = experiment_dir / "metrics.json"
     if not summary_path.exists():
         raise SystemExit(f"Missing summary file: {summary_path}")
 
     summary_rows = load_jsonl(summary_path)
     trajectory_rows = load_jsonl(trajectory_path)
+    metrics = load_json(metrics_path)
     trajectory_map = {
         row["question_index"]: row for row in trajectory_rows if "question_index" in row
     }
@@ -910,8 +930,9 @@ def main():
             "experiment_dir": str(experiment_dir),
             "summary_file": summary_path.name,
             "trajectory_file": trajectory_path.name if trajectory_path.exists() else None,
+            "metrics_file": metrics_path.name if metrics_path.exists() else None,
         },
-        "overview": build_overview(summary_rows),
+        "overview": build_overview(summary_rows, metrics=metrics),
         "cases": build_cases(summary_rows, trajectory_map),
     }
 

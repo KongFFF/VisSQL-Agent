@@ -773,6 +773,7 @@ def evaluate(
 
     write_error_report(error_report, error_rows)
     print_scores(scores, etype, include_turn_acc=include_turn_acc)
+    return scores
 
 
 # Rebuild SQL functions for value evaluation
