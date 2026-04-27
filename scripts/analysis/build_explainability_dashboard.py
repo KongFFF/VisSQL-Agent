@@ -175,7 +175,7 @@ def write_data_json(dashboard_dir: Path, payload: dict):
         json.dump(payload, f, ensure_ascii=False)
 
 
-def build_html(title: str):
+def build_html(title: str, embedded_data_json: str):
     html = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -281,6 +281,8 @@ def build_html(title: str):
       display: flex;
       flex-direction: column;
       gap: 8px;
+      max-height: calc(100vh - 280px);
+      overflow-y: auto;
     }}
     .case-item {{
       border: 1px solid var(--line);
@@ -304,7 +306,7 @@ def build_html(title: str):
       color: var(--muted);
       margin-bottom: 8px;
     }}
-    .codebox, pre {{
+    pre {{
       white-space: pre-wrap;
       word-break: break-word;
       background: #0f172a;
@@ -314,6 +316,7 @@ def build_html(title: str):
       overflow-x: auto;
       font-size: 12px;
       line-height: 1.5;
+      margin: 0;
     }}
     .grid-two {{
       display: grid;
@@ -353,6 +356,7 @@ def build_html(title: str):
       .page {{ grid-template-columns: 1fr; }}
       .sidebar {{ border-right: none; border-bottom: 1px solid var(--line); }}
       .grid-two {{ grid-template-columns: 1fr; }}
+      .case-list {{ max-height: none; }}
     }}
   </style>
 </head>
@@ -382,8 +386,8 @@ def build_html(title: str):
           <option value="applied">只看 skill 命中</option>
           <option value="signal">只看有 pattern signal</option>
           <option value="fallback">只看 pattern fallback</option>
-          <option value="value">只看有 value hints</option>
-          <option value="fallback_used">只看启用 success fallback</option>
+          <option value="value">只看启用 value hints</option>
+          <option value="fallback_used">只看使用 success fallback</option>
         </select>
       </div>
 
@@ -418,6 +422,7 @@ def build_html(title: str):
     </main>
   </div>
 
+  <script id="dashboard-data" type="application/json">__DATA__</script>
   <script>
     const state = {{
       data: null,
@@ -438,6 +443,19 @@ def build_html(title: str):
     function formatPercent(value) {{
       if (value === null || value === undefined) return '-';
       return (value * 100).toFixed(1) + '%';
+    }}
+
+    function renderDictTable(obj) {{
+      const rows = Object.entries(obj || {{}});
+      if (!rows.length) return '<div class="muted">暂无数据</div>';
+      return `
+        <table class="table">
+          <thead><tr><th>项目</th><th>值</th></tr></thead>
+          <tbody>
+            ${{rows.map(([k, v]) => `<tr><td>${{escapeHtml(k)}}</td><td>${{escapeHtml(typeof v === 'object' ? JSON.stringify(v) : v)}}</td></tr>`).join('')}}
+          </tbody>
+        </table>
+      `;
     }}
 
     function renderOverview() {{
@@ -466,31 +484,16 @@ def build_html(title: str):
         </div>
       `).join('');
 
-      document.getElementById('routeStats').innerHTML = renderDictTable(
-        {{
-          ...overview.route_counts,
-          ...Object.fromEntries(Object.entries(overview.route_rates).map(([k,v]) => [`${{k}} rate`, formatPercent(v)])),
-        }}
-      );
+      document.getElementById('routeStats').innerHTML = renderDictTable({{
+        ...overview.route_counts,
+        ...Object.fromEntries(Object.entries(overview.route_rates).map(([k, v]) => [`${{k}} rate`, formatPercent(v)])),
+      }});
 
       const patternLines = {{
-        ...Object.fromEntries(Object.entries(overview.pattern_template_counts).map(([k, v]) => [`template:${{k}}`, v])),
-        ...Object.fromEntries(Object.entries(overview.generic_pattern_reason_counts).slice(0, 10).map(([k, v]) => [`fallback:${{k}}`, v])),
+        ...Object.fromEntries(Object.entries(overview.pattern_template_counts || {{}}).map(([k, v]) => [`template:${{k}}`, v])),
+        ...Object.fromEntries(Object.entries(overview.generic_pattern_reason_counts || {{}}).slice(0, 10).map(([k, v]) => [`fallback:${{k}}`, v])),
       }};
       document.getElementById('patternStats').innerHTML = renderDictTable(patternLines);
-    }}
-
-    function renderDictTable(obj) {{
-      const rows = Object.entries(obj || {});
-      if (!rows.length) return '<div class="muted">暂无数据</div>';
-      return `
-        <table class="table">
-          <thead><tr><th>项</th><th>值</th></tr></thead>
-          <tbody>
-            ${{rows.map(([k, v]) => `<tr><td>${{escapeHtml(k)}}</td><td>${{escapeHtml(typeof v === 'object' ? JSON.stringify(v) : v)}}</td></tr>`).join('')}}
-          </tbody>
-        </table>
-      `;
     }}
 
     function getFilters() {{
@@ -528,6 +531,10 @@ def build_html(title: str):
       const listEl = document.getElementById('caseList');
       const countEl = document.getElementById('caseCount');
       countEl.textContent = `当前筛选：${{state.filteredCases.length}} 题`;
+      if (!state.filteredCases.length) {{
+        listEl.innerHTML = '<div class="muted">没有匹配的题目。</div>';
+        return;
+      }}
       listEl.innerHTML = state.filteredCases.map((item) => {{
         const active = item.question_index === state.selectedIndex ? 'active' : '';
         const pills = [
@@ -535,7 +542,7 @@ def build_html(title: str):
           `<span class="pill accent">${{escapeHtml(item.route || 'unknown')}}</span>`,
         ];
         if (item.pattern_template) pills.push(`<span class="pill warn">${{escapeHtml(item.pattern_template)}}</span>`);
-        if (item.used_success_fallback) pills.push(`<span class="pill warn">fallback</span>`);
+        if (item.used_success_fallback) pills.push('<span class="pill warn">fallback</span>');
         return `
           <div class="case-item ${{active}}" data-case-id="${{item.question_index}}">
             <div class="title">#${{item.question_index}} · ${{escapeHtml(item.db_id || '')}}</div>
@@ -552,6 +559,14 @@ def build_html(title: str):
           renderCaseDetail();
         }});
       }});
+    }}
+
+    function buildKvRows(rows) {{
+      return rows.map(([k, v]) => `<div class="kv"><div class="k">${{escapeHtml(k)}}</div><div>${{escapeHtml(v)}}</div></div>`).join('');
+    }}
+
+    function asPrettyJson(value) {{
+      return escapeHtml(JSON.stringify(value ?? null, null, 2));
     }}
 
     function renderCaseDetail() {{
@@ -579,45 +594,45 @@ def build_html(title: str):
         ['Row Count', item.final_row_count ?? '-'],
       ];
 
-      const blocks = `
+      detail.innerHTML = `
         <div class="card">
           <div class="section-title">问题与结果</div>
           <div class="kv"><div class="k">Question</div><div>${{escapeHtml(item.question || '')}}</div></div>
           <div class="kv"><div class="k">Gold SQL</div><div><pre>${{escapeHtml(item.gold_sql || '')}}</pre></div></div>
           <div class="kv"><div class="k">Final SQL</div><div><pre>${{escapeHtml(item.final_sql || '')}}</pre></div></div>
-          ${summaryRows.map(([k,v]) => `<div class="kv"><div class="k">${{escapeHtml(k)}}</div><div>${{escapeHtml(v)}}</div></div>`).join('')}
+          ${{buildKvRows(summaryRows)}}
         </div>
 
         <div class="grid-two">
           <div class="card">
             <div class="section-title">Retrieval</div>
-            <div class="kv"><div class="k">Seed Tables</div><div>${{escapeHtml(JSON.stringify(item.schema_seed_tables || []))}}</div></div>
-            <div class="kv"><div class="k">Selected Tables</div><div>${{escapeHtml(JSON.stringify(item.schema_selected_tables || []))}}</div></div>
-            <div class="kv"><div class="k">Selected FKs</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_selected_foreign_keys || [], null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Join Paths</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_join_paths || [], null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Explanation</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_retrieval_explanation || {{}}, null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Seed Tables</div><div><pre>${{asPrettyJson(item.schema_seed_tables || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Selected Tables</div><div><pre>${{asPrettyJson(item.schema_selected_tables || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Selected FKs</div><div><pre>${{asPrettyJson(item.schema_selected_foreign_keys || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Join Paths</div><div><pre>${{asPrettyJson(item.schema_join_paths || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Explanation</div><div><pre>${{asPrettyJson(item.schema_retrieval_explanation || {{}})}}</pre></div></div>
           </div>
 
           <div class="card">
             <div class="section-title">Value Grounding</div>
             <div class="kv"><div class="k">Value Hints Enabled</div><div>${{escapeHtml(item.schema_value_hints_enabled)}}</div></div>
-            <div class="kv"><div class="k">Question Entities</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_value_hint_question_entities || [], null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Entity Matches</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_value_hint_entity_matches || [], null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Sampled Values</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_value_hint_sampled_values || {{}}, null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Candidate Columns</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_value_hint_candidate_columns || [], null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Question Entities</div><div><pre>${{asPrettyJson(item.schema_value_hint_question_entities || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Entity Matches</div><div><pre>${{asPrettyJson(item.schema_value_hint_entity_matches || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Sampled Values</div><div><pre>${{asPrettyJson(item.schema_value_hint_sampled_values || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Candidate Columns</div><div><pre>${{asPrettyJson(item.schema_value_hint_candidate_columns || [])}}</pre></div></div>
           </div>
         </div>
 
         <div class="grid-two">
           <div class="card">
             <div class="section-title">Pattern / Skill Route</div>
-            <div class="kv"><div class="k">Candidate Templates</div><div><pre>${{escapeHtml(JSON.stringify(item.pattern_candidate_templates || [], null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Router Decision</div><div><pre>${{escapeHtml(JSON.stringify(item.pattern_router_decision || {{}}, null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Candidate Templates</div><div><pre>${{asPrettyJson(item.pattern_candidate_templates || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Router Decision</div><div><pre>${{asPrettyJson(item.pattern_router_decision || {{}})}}</pre></div></div>
           </div>
 
           <div class="card">
             <div class="section-title">Verifier / Fallback</div>
-            <div class="kv"><div class="k">Final Verifier Result</div><div><pre>${{escapeHtml(JSON.stringify(item.final_verifier_result || {{}}, null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Final Verifier Result</div><div><pre>${{asPrettyJson(item.final_verifier_result || {{}})}}</pre></div></div>
             <div class="kv"><div class="k">Used Success Fallback</div><div>${{escapeHtml(item.used_success_fallback)}}</div></div>
             <div class="kv"><div class="k">Selected Success Attempt</div><div>${{escapeHtml(item.selected_success_attempt ?? '-')}}</div></div>
           </div>
@@ -627,32 +642,34 @@ def build_html(title: str):
           <div class="card">
             <div class="section-title">Column Signals</div>
             <div class="kv"><div class="k">Column Hints Enabled</div><div>${{escapeHtml(item.schema_column_hints_enabled)}}</div></div>
-            <div class="kv"><div class="k">Hint Columns</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_column_hint_columns || [], null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Table Lexical Scores</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_table_scores_lexical || {{}}, null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Table Column Boosts</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_table_column_boosts || {{}}, null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Column Scores</div><div><pre>${{escapeHtml(JSON.stringify(item.schema_column_scores || {{}}, null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Hint Columns</div><div><pre>${{asPrettyJson(item.schema_column_hint_columns || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Table Lexical Scores</div><div><pre>${{asPrettyJson(item.schema_table_scores_lexical || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Table Column Boosts</div><div><pre>${{asPrettyJson(item.schema_table_column_boosts || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Column Scores</div><div><pre>${{asPrettyJson(item.schema_column_scores || [])}}</pre></div></div>
           </div>
 
           <div class="card">
             <div class="section-title">Attempts / Probe Logs</div>
-            <div class="kv"><div class="k">Attempt Records</div><div><pre>${{escapeHtml(JSON.stringify(item.attempt_records || [], null, 2))}}</pre></div></div>
-            <div class="kv"><div class="k">Probe Logs</div><div><pre>${{escapeHtml(JSON.stringify(item.probe_logs || [], null, 2))}}</pre></div></div>
+            <div class="kv"><div class="k">Attempt Records</div><div><pre>${{asPrettyJson(item.attempt_records || [])}}</pre></div></div>
+            <div class="kv"><div class="k">Probe Logs</div><div><pre>${{asPrettyJson(item.probe_logs || [])}}</pre></div></div>
           </div>
         </div>
       `;
-
-      detail.innerHTML = blocks;
     }}
 
-    async function bootstrap() {{
-      const res = await fetch('./data.json');
-      state.data = await res.json();
+    function bootstrap() {{
+      const embedded = document.getElementById('dashboard-data');
+      if (!embedded || !embedded.textContent.trim()) {{
+        throw new Error('Embedded dashboard data is missing.');
+      }}
+      state.data = JSON.parse(embedded.textContent);
       renderOverview();
 
       ['searchInput', 'routeFilter', 'successFilter', 'patternFilter'].forEach((id) => {{
         document.getElementById(id).addEventListener('input', applyFilters);
         document.getElementById(id).addEventListener('change', applyFilters);
       }});
+
       applyFilters();
     }}
 
@@ -663,7 +680,12 @@ def build_html(title: str):
 </body>
 </html>
 """
-    return html.replace("__TITLE__", title)
+    return (
+        html.replace("__TITLE__", title)
+        .replace("__DATA__", embedded_data_json)
+        .replace("{{", "{")
+        .replace("}}", "}")
+    )
 
 
 def main():
@@ -703,8 +725,9 @@ def main():
     }
 
     write_data_json(dashboard_dir, payload)
+    embedded_data_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     html_path = dashboard_dir / "index.html"
-    html_path.write_text(build_html(title), encoding="utf-8")
+    html_path.write_text(build_html(title, embedded_data_json), encoding="utf-8")
 
     print(f"Dashboard written to: {html_path}")
 
