@@ -70,6 +70,90 @@ GroundedSQL-Agent/
 
 ---
 
+### 模型与权重说明
+
+本仓库的正式系统建立在 **Qwen2.5-Coder-7B-Instruct** 基座模型之上，公开推理代码默认加载的最终 LoRA 检查点名称为：
+
+- 基座模型：`/root/autodl-tmp/qwen2.5-coder-7b-instruct`
+- 最终推理权重：`/root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6`
+
+出于仓库体积、分发成本与版本管理的考虑，**本仓库不直接托管 LoRA 权重文件本体**；公开仓库主要提供：
+
+- 完整代码实现
+- 数据构造脚本
+- 推理与评测命令
+- 实验结果与分析文档
+
+如需完整复现，可基于仓库中的数据构造与训练配置重新训练，或在具备权重文件的环境中直接加载推理。
+
+#### 训练数据格式
+
+项目最终公开版本使用的是 `finetune_tools/format_data_v6.py` 所构造的 **ShareGPT 风格 SFT 数据**，输出文件为：
+
+- `data/spider_sharegpt_v6.json`
+
+每条样本由三轮对话组成：
+
+1. `system`：要求模型扮演数据库架构师与 SQL 专家，只输出 SQL
+2. `user`：输入内容为 **v6 schema 表示 + 自然语言问题**
+3. `assistant`：目标 SQL
+
+其中，`v6 schema` 不是简单的 `CREATE TABLE` 平铺文本，而是由 `build_schema_dict_v6(...)` 构造的 **中文半结构化 schema 表示**，其特点包括：
+
+- 以数据库为单位组织
+- 显式写出表与字段
+- 用自然语言补充主键（PK）与外键（FK）语义
+- 在输入层面对 schema 结构进行压缩与重组，以提升模型对关系结构的理解效率
+
+#### 训练/推理配置（仓库中可确认的部分）
+
+结合 `finetune_tools/main_eval.py`、`finetune_tools/llm_inference_v6.py`、训练记录以及最终 `adapter_config`，本项目最终公开版本可确认的关键配置如下：
+
+**训练范式**
+
+- 任务类型：`CAUSAL_LM`
+- 微调方式：**SFT + LoRA**
+- PEFT 类型：`LORA`
+- PEFT 版本：`0.18.1`
+- 基座模板：`qwen`
+
+**LoRA 关键参数**
+
+- `r = 64`
+- `lora_alpha = 128`
+- `lora_dropout = 0`
+- `bias = "none"`
+- `use_dora = false`
+- `use_qalora = false`
+- `use_rslora = false`
+- `inference_mode = true`（当前公开权重用于推理加载）
+
+这意味着最终公开版本采用的是一组**较高 rank、无 dropout 的标准 LoRA 适配器配置**，重点追求在 Spider 文本到 SQL 任务上的稳定拟合能力，而不是进一步叠加 DoRA / QALoRA / RSLoRA 等额外变体。
+
+**输入与推理配置**
+
+- 推理输入格式：`system prompt + v6 schema + question`
+- `v6 schema`：中文半结构化 schema 表示，显式补充 PK/FK 语义
+- 推理解码方式：`do_sample = false`（贪心解码）
+- 最大生成长度：`max_new_tokens = 512`
+- 推理数值精度：`bfloat16`
+
+**权重依赖关系**
+
+- `base_model_name_or_path = /root/autodl-tmp/qwen2.5-coder-7b-instruct`
+- 最终 LoRA 权重在该基座模型上加载
+- 当前公开仓库不包含 adapter 权重文件本体，但保留完整的加载路径、推理代码与实验命令
+
+仓库中保留的历史训练记录还显示，项目在多个版本中持续采用 LoRA 监督微调范式，并围绕以下维度做过系统试验：
+
+- schema 表达格式（`v1 / v3 / v5 / v6`）
+- LoRA rank / alpha
+- 是否使用 DoRA
+- 上下文长度（如 `2048 / 3072 / 4096`）
+- 数据集版本（如 `spider_sql / spider_golden / spider_v5`）
+
+对外公开时，本项目重点展示的是最终用于正式系统推理的 **`qwen_spider_lora_v6`** 及其对应的数据格式与完整实验结果，而不是将所有历史训练权重一并托管到仓库中。
+
 ## 4. 运行方式
 
 ### 4.1 微调前基础模型（无 LoRA）
