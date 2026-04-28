@@ -1,73 +1,351 @@
+# GroundedSQL-Agent
 
+GroundedSQL-Agent 是一个面向复杂 Text-to-SQL 任务的数据库智能代理系统，通过将自然语言问题与真实数据库中的 **schema、value 和 execution evidence** 对齐，把纯微调 SQL 生成模型升级为一个 **retrieval-enhanced、value-aware、risk-controlled、explainable** 的数据库 Agent。
 
-# VisSQL-Agent: 基于多智能体反思与视觉接地的多模态数据库智能体系统
-*(原副标题：~~基于偏好对齐与视觉接地的多模态数据库智能体系统~~)*
+当前公开版本在 Spider 开发集上的正式最优基线达到：
 
-## 📑 项目总览 (Project Overview)
-本项目旨在解决企业级复杂数据查询与可视化分析的痛点。系统摒弃了传统的“纯文本 Schema 输入”限制，演进为一个能够“看懂 ER 图、听懂自然语言、自主查库并反思纠错”的多模态自治智能体。
-项目开发严格遵循“底层微调 $\rightarrow$ 架构解构 $\rightarrow$ 多模态融合”的三阶段演进路线，全面展示了从参数高效微调（PEFT）、原生大模型状态机开发、RAG 检索增强，到底层 PyTorch 算子魔改（GMU 注入）的全栈 AI 系统架构能力。
-
----
-
-## 🚀 阶段一：数据驱动的深度微调与能力边界探索 (Data-Centric SFT & Baseline)
-*(原标题：~~阶段一：NL2SQL-DPO（核心推理引擎微调）~~)*
-
-**目标定位：打造系统的心智大脑，压榨 7B 级别模型在 Text-to-SQL 任务上的物理极限。**
-
-本阶段我们剥离了商业大模型的黑盒 API，在本地算力上从零训练专属领域模型。在经历了 V1-V6 版本的密集迭代后，我们证明了单纯扩大模型容量（如 DoRA 与高 Rank 探索）会遭遇“对齐税”与超参坍塌陷阱。系统最终转向**以数据为中心（Data-Centric）**的路线，确立了以“高信噪比单行 Schema”为核心的微调策略。
-
-### 🛠️ 准备工作 (Preparation)
-* **算力环境：** 配备单张 RTX 3090/4090（24G 显存）的 Linux 服务器，配置好 CUDA 12.x 与 Anaconda 环境。
-* **开源脚手架：** 部署 `LLaMA-Factory` 框架。
-* **基座模型：** `Qwen2.5-Coder-7B-Instruct`。
-* **测评工具：** 引入 Spider 官方最高标准的 **Test-Suite Evaluation（测试套件）**，在包含变态级突变数据的沙盒中还原绝对真实的执行准确率（Execution Accuracy）。
-
-### ⚙️ 核心开发任务 (Action Items)
-1.  **数据降噪与工程重构：** 弃用语法噪音极大的纯 DDL，构建 V6 版极简高密度 Schema（单行紧凑格式+原生 ChatML 控制符），最大化利用 Agent 的 Token 窗口。
-2.  **SFT 监督微调消融实验：** 使用 LoRA 算法针对核心层进行微调，详尽记录 $r=8$ 到 $r=64$ 期间的过拟合现象，并最终在 V6 版本锁定最佳权重。
-3.  ~~**DPO 偏好对齐构建：** 针对同一问题，构造一对数据开启 DPO 训练，强迫模型学习“什么是好代码”。~~
-    * *⚠️ 架构调整说明：已废弃 DPO。Text-to-SQL 属于具有绝对客观执行标准的严谨逻辑任务，DPO 更适合“语气/喜好对齐”的主观选美比赛，无法促使模型涌现出真正的多步逻辑推理能力。*
-4.  **错题本法医级鉴定：** 构建自动化 `bad_cases.json` 拦截器。基于对拦截下的 200+ 道 Logic Error 的分析，得出结论：纯端到端（End-to-End）生成复杂 SQL 已触达物理极限，必须引入后续的 Agent 路由与反思机制。
-
-### 🎯 预期目标与交付物
-* **交付物：** 合并后的专属 V6 模型权重文件（已进行本地防丢失备份）；一份极其详尽的消融实验报告，记录在官方地狱级 Test-Suite 下将准确率推升至 **74.2%** 的全过程。
-* **实际耗时：** 2-3 周（已完成）。
+- **Execution Accuracy: 79.3%**
+- **Exact Match Accuracy: 78.6%**
 
 ---
 
-## 🧠 阶段二：Agentic Pipeline 与闭环反思引擎 (Native Control Flow & Reflexion)
-*(原标题：~~阶段二：AutoData Agent（原生控制流与沙盒反思）~~)*
+## 1. 项目简介
 
-**目标定位：突破单次前向传播的逻辑天花板，搭建融合 RAG 路由与记忆纠错循环的多阶段智能体流水线。**
+在 Text-to-SQL 场景中，纯端到端模型即使经过监督微调，仍然会在以下方面频繁出错：
 
-坚决抛弃 LangChain 等高度封装的黑盒框架，直接使用原生 Python 核心库手写大模型状态机。让第一阶段微调出的极简 V6 模型作为核心大脑节点，配以独立的执行器与检索节点，实现复杂逻辑的降维打击。
+- 值与列的错误对齐（literal 绑定错误）
+- 多表关系下的 schema 选择与 join 路径选择
+- superlative / count-family 等结构稳定子任务
+- SQL 可执行但语义错误的“隐性失败”
 
-### 🛠️ 准备工作 (Preparation)
-* **环境依赖：** Python 原生的 `sqlite3`, `re` (正则解析), `subprocess` 等标准库。
-* **沙盒构建：** 部署包含复杂关联（如多重 JOIN、交并差 IUEN 陷阱）的本地 `.sqlite` 测试靶场。
+GroundedSQL-Agent 的核心目标，不是继续堆叠更大的模型，而是围绕真实数据库执行过程，把系统从“单次直出 SQL”升级成“带检索、带路由、带验证、带解释”的数据库智能代理。
 
-### ⚙️ 核心开发任务 (Action Items)
-1.  **Agentic RAG (动态表结构检索)：** 摒弃“一次性全量喂入 Schema”的端到端作法。构建独立的 Schema Router 节点，针对用户问题进行预过滤，精准提取 2-3 张目标表及外键，消除冗余表结构的注意力干扰。
-2.  **结构化 Memory (多模记忆流)：** 引入**工作记忆 (Working Memory)** 维持单次查询的“代码初稿与执行报错”上下文；规划**长期记忆 (Long-term Memory)** 沉淀历史典型错题（如对 IUEN 陷阱的纠正逻辑），实现“吃一堑长一智”。
-3.  **硬核 Reflexion 闭环：** 当 SQL 在沙盒中抛出语法错误或返回空结果时，系统自动捕获 SQLite 的底层报错日志。将其压入 Working Memory，强制 Agent 触发“基于报错分析的二次重写”机制。
-4.  **原生状态机与调度：** 编写核心调度器，定义 Coder Node 与 Executor Node，利用标准 JSON Message List 完成高密度的跨节点信息传递。
-5.  **（前瞻布局）迈向 GRPO 的基建探索：** 本阶段手写的沙盒执行节点，实质上构建了基于绝对规则的 Reward（奖励）函数验证器，为未来实现模型内生逻辑进化铺平道路。
+当前公开版系统主要包含以下能力：
 
-### 🎯 预期目标与交付物
-* **交付物：** 一个纯白盒、包含 RAG 与 Memory 组件的极低延迟 Agent 状态机代码库；系统能够在一轮或多轮沙盒反思后，自主攻克 V6 错题本中的 Extra 级难度数据。
-* **预计耗时：** 2-3 周（进行中）。
+- **Schema Retrieval**：针对每个问题动态选择紧凑的 schema 子图，而不是把整库 schema 全量输入模型
+- **Value Grounding**：补充值级证据，使实体值、枚举值、代码值更容易落到正确列上
+- **Specialized Route**：为部分结构稳定的 superlative / count-family 问题提供高精度专项路径
+- **Semantic Risk Control**：在 SQL 可执行之后继续做语义风险识别与保守 fallback
+- **Explainability Dashboard**：为每轮实验自动生成静态网页，展示检索、值匹配、路由、verifier 与单题轨迹
 
 ---
 
-## 👁️ 阶段三：Visually-Grounded SQL Agent（多模态架构融合）
-**目标定位：拔高学术天花板，实现前沿的图表视觉实体对齐。**
+## 2. 仓库结构
 
-真实业务中往往通过 ER 图（实体关系图）沟通表结构。本阶段将系统升维，接入视觉能力，并深入 PyTorch 底层修改网络拓扑，解决多模态特征融合时的信息丢失问题。
+```text
+GroundedSQL-Agent/
+|-- agent/                # Agent 核心：coder / executor / memory / main agent class
+|-- retrieval/            # schema retrieval 与 schema prompt 构造
+|-- superlative/          # 结构化专项路径（superlative / count-family）
+|-- verifier/             # semantic verifier
+|-- finetune_tools/       # 纯模型 / 纯微调模型评测脚本
+|-- spider_eval/          # Spider 官方评测相关工具
+|-- scripts/analysis/     # 分析脚本、dashboard 生成器等
+|-- experiments/          # 各轮实验输出目录
+|-- data/                 # Spider dev 数据、gold SQL、tables、数据库
+|-- main_eval_agent.py    # 完整 Agent 系统正式评测入口
+`-- README.md
+```
 
-*(阶段三具体内容与上一版保持一致)*
+---
 
-***
+## 3. 环境与数据
 
-这套 README 一拿出去，懂行的面试官一眼就能看出你经历了极其完整的工业级系统思考。
+### 推荐环境
 
-现在，弹药和蓝图都已齐备。我们的 Python 代码要从哪里破局？你是打算先写一个能精准过滤 `tables.json` 的 **RAG 检索节点**，还是直接进入最刺激的环节：手写那个能让模型实现自我救赎的 **Reflexion 报错捕获节点**？
+- Python 3.10+
+- 支持 CUDA 的 GPU 环境
+- Spider 开发集相关文件：
+  - `data/dev.json`
+  - `data/dev_gold.sql`
+  - `data/tables.json`
+  - 数据库根目录（通常为以下之一）：
+    - `data/database`
+    - `data/testsuitedatabases/database`
+
+### 关于数据库路径
+
+本仓库当前 README 中的命令默认使用 `data/database`，因为这是当前项目目录下最直接的本地布局。  
+如果你的 Spider 数据库存放在 `data/testsuitedatabases/database`，只需要替换命令中的 `--db-root` 或 `--db` 路径即可。
+
+---
+
+## 4. 运行方式
+
+### 4.1 微调前基础模型（无 LoRA）
+
+该实验用于评估纯基础模型在 Spider 上的零样本性能。
+
+```bash
+python finetune_tools/main_eval.py \
+  --base-model /root/autodl-tmp/qwen2.5-coder-7b-instruct \
+  --no-lora \
+  --schema-format v1 \
+  --output-file predict_base_zero_shot_v1.txt
+```
+
+官方评测：
+
+```bash
+python -m spider_eval.evaluation \
+  --gold data/dev_gold.sql \
+  --pred predict_base_zero_shot_v1.txt \
+  --db data/database \
+  --table data/tables.json \
+  --etype all
+```
+
+---
+
+### 4.2 纯微调模型（不启用 Agent）
+
+该实验用于评估 LoRA 微调模型本身的端到端 SQL 生成能力。
+
+```bash
+python finetune_tools/main_eval.py \
+  --base-model /root/autodl-tmp/qwen2.5-coder-7b-instruct \
+  --lora-path /root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6 \
+  --output-file predict_pure_finetuned.txt
+```
+
+官方评测：
+
+```bash
+python -m spider_eval.evaluation \
+  --gold data/dev_gold.sql \
+  --pred predict_pure_finetuned.txt \
+  --db data/database \
+  --table data/tables.json \
+  --etype all
+```
+
+---
+
+### 4.3 正式最优基线（完整 Agent 系统）
+
+这是当前公开版本的正式最优配置。
+
+```bash
+python main_eval_agent.py \
+  --entrypoint formal \
+  --base-model /root/autodl-tmp/qwen2.5-coder-7b-instruct \
+  --lora-path /root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6 \
+  --dev-path data/dev.json \
+  --tables-path data/tables.json \
+  --db-root data/database \
+  --output-dir experiments/formal_final \
+  --max-retries 3
+```
+
+该命令会在实验目录下生成：
+
+- `predict_agent.txt`
+- `agent_run_summary.jsonl`
+- `agent_trajectories.jsonl`
+- `metrics.json`（若本地官方评测依赖完整）
+
+如需手动调用官方评测：
+
+```bash
+python -m spider_eval.evaluation \
+  --gold data/dev_gold.sql \
+  --pred experiments/formal_final/predict_agent.txt \
+  --db data/database \
+  --table data/tables.json \
+  --etype all
+```
+
+---
+
+### 4.4 关键消融实验
+
+#### (a) 关闭 value grounding
+
+```bash
+python main_eval_agent.py \
+  --entrypoint experiment \
+  --experiment value_hints_off \
+  --base-model /root/autodl-tmp/qwen2.5-coder-7b-instruct \
+  --lora-path /root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6 \
+  --dev-path data/dev.json \
+  --tables-path data/tables.json \
+  --db-root data/database \
+  --output-dir experiments/ablation_value_hints_off \
+  --max-retries 3
+```
+
+#### (b) 历史结构化路线 `phase1_d`
+
+```bash
+python main_eval_agent.py \
+  --entrypoint experiment \
+  --experiment legacy_phase1_d \
+  --base-model /root/autodl-tmp/qwen2.5-coder-7b-instruct \
+  --lora-path /root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6 \
+  --dev-path data/dev.json \
+  --tables-path data/tables.json \
+  --db-root data/database \
+  --output-dir experiments/legacy_phase1_d \
+  --max-retries 3
+```
+
+#### (c) 历史统一 count-family planner `phase2_a`
+
+```bash
+python main_eval_agent.py \
+  --entrypoint experiment \
+  --experiment legacy_phase2_a \
+  --base-model /root/autodl-tmp/qwen2.5-coder-7b-instruct \
+  --lora-path /root/autodl-tmp/LLaMA-Factory/saves/Qwen2.5-7B/lora/qwen_spider_lora_v6 \
+  --dev-path data/dev.json \
+  --tables-path data/tables.json \
+  --db-root data/database \
+  --output-dir experiments/legacy_phase2_a \
+  --max-retries 3
+```
+
+---
+
+### 4.5 可解释性网页生成
+
+每轮实验完成后，可以从日志中自动生成一套静态解释性网页：
+
+```bash
+python scripts/analysis/build_explainability_dashboard.py \
+  --experiment-dir experiments/formal_final \
+  --title "GroundedSQL-Agent Dashboard · Formal Final"
+```
+
+会生成：
+
+- `experiments/formal_final/dashboard/index.html`
+- `experiments/formal_final/dashboard/data.json`
+
+网页中可查看：
+
+- 本轮实验总览
+- route / skill 分布
+- retrieval explanation
+- value grounding 证据
+- verifier / fallback 信息
+- 单题案例详情与轨迹
+
+---
+
+## 5. 主要实验结果
+
+以下结果来自当前项目最终实验记录。
+
+### Spider 开发集 Execution Accuracy
+
+| 设置 | Execution Accuracy |
+|---|---:|
+| 基础模型 zero-shot（`v1` schema） | 71.5 |
+| 基础模型 zero-shot（`v6` schema） | 70.5 |
+| 纯微调模型 | 74.2 |
+| 完整 Agent（关闭 value grounding） | 75.4 |
+| 历史结构化路线 `phase1_d` | 79.2 |
+| 历史统一 count-family 路线 `phase2_a` | 78.4 |
+| **正式最优基线** | **79.3** |
+
+### 正式最优基线分难度表现
+
+| 难度 | Execution Accuracy |
+|---|---:|
+| Easy | 94.4 |
+| Medium | 85.0 |
+| Hard | 71.3 |
+| Extra | 50.0 |
+| **All** | **79.3** |
+
+### 正式最优基线 Exact Match
+
+| 指标 | 数值 |
+|---|---:|
+| Exact Match Accuracy | 78.6 |
+
+---
+
+## 6. 主要结论
+
+### 6.1 项目最关键的增益来自 value-level grounding
+
+本项目最重要的经验结论是：  
+当纯微调模型已经具备一定 SQL 生成能力后，系统瓶颈会从 **schema-level understanding** 逐步转向 **value-level grounding**。
+
+这一点由如下对比直接支持：
+
+- 正式最优基线：**79.3**
+- 去掉 value grounding：**75.4**
+
+也就是说，本项目的关键提升并不只是“多给一些 prompt 信息”，而是让系统在值层面具备：
+
+- 值到列的更可靠绑定
+- 实体名 / 代码值 / 枚举值的更合理解释
+- 条件 literal 的更稳定落列
+
+### 6.2 结构化专项路线是有效支线，但不是总增益主来源
+
+项目中保留了一条针对 superlative / count-family 子任务的高精度结构化路线。  
+这条路线对局部结构稳定题型有效，但整体最主要的增益仍然来自：
+
+- value grounding
+- retrieval 子图构建
+- 保守的 semantic risk control
+
+### 6.3 最终公开基线强调“收敛”和“稳健”
+
+在开发过程中，一些看起来更复杂的设计并没有稳定提升结果，例如：
+
+- 过于激进的 semantic verification
+- 过于激进的列提示暴露
+- 缺少精度约束的复杂 bridge / graph 风格增强
+
+因此最终公开版基线更强调：
+
+- 保守但有效的 retrieval
+- 值级证据增强
+- 风险控制与 fallback
+- 可解释性输出
+
+---
+
+## 7. 项目价值
+
+GroundedSQL-Agent 并不是一个单纯的 prompt engineering 结果，也不是一个只追求 benchmark 数字的脚本集合。  
+它更像是一个围绕真实数据库执行闭环展开的系统研究项目，展示了如何从：
+
+- 一个纯微调的 SQL 生成模型
+
+逐步演化到：
+
+- 一个带检索增强、值级 grounding、结构化专项路由、风险控制与解释能力的数据库智能代理
+
+从项目表达上，这个仓库主要体现两层价值：
+
+1. 一个可复现的 7B 级 Text-to-SQL Agent 基线  
+2. 一条清晰的系统演化路线：从纯模型到 value-aware agent
+
+---
+
+## 8. 说明
+
+- 项目内部研发笔记与保研材料并未全部公开，公开仓库只保留适合对外展示的代码与文档。
+- `docs/` 目录建议用于放置整理后的外部展示材料，而不是原始开发记录。
+- 某些官方评测依赖（如 `sqlparse`、NLTK 分词环境）需要在本地 Python 环境中自行准备。
+
+---
+
+## 9. 使用建议
+
+如果保研老师或项目评审希望快速理解本项目，建议优先查看以下入口：
+
+- 纯模型 / 纯微调模型评测：`finetune_tools/main_eval.py`
+- 正式 Agent 评测入口：`main_eval_agent.py`
+- 可解释性网页生成：`scripts/analysis/build_explainability_dashboard.py`
+
+如果需要展示项目整体能力，最推荐直接提供：
+
+- 本仓库链接
+- `formal_final` 对应的正式基线实验结果
+- 对应的 explainability dashboard 页面

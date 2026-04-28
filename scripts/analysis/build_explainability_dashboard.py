@@ -6,7 +6,7 @@ from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate a static explainability dashboard for a VisSQL-Agent experiment."
+        description="Generate a static explainability dashboard for a GroundedSQL-Agent experiment."
     )
     parser.add_argument(
         "--experiment-dir",
@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument(
         "--title",
         default=None,
-        help="Optional dashboard title. Defaults to the experiment directory name.",
+        help="Optional dashboard title. Defaults to 'GroundedSQL-Agent Dashboard · <experiment-name>'.",
     )
     return parser.parse_args()
 
@@ -922,7 +922,7 @@ def main():
         row["question_index"]: row for row in trajectory_rows if "question_index" in row
     }
 
-    title = args.title or experiment_dir.name
+    title = args.title or f"GroundedSQL-Agent Dashboard · {experiment_dir.name}"
     payload = {
         "meta": {
             "title": title,

@@ -91,7 +91,8 @@ def format_to_sharegpt(train_path, db_schemas, output_path):
 
 if __name__ == "__main__":
     # 定义文件路径
-    data_dir = r"D:\VisSQL-Agent\data"
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_dir = os.path.join(repo_root, "data")
     tables_file = os.path.join(data_dir, "tables.json")
     train_file = os.path.join(data_dir, "train_spider.json")
     output_file = os.path.join(data_dir, "spider_sharegpt.json")
